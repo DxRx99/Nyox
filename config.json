@@ -1,0 +1,37 @@
+{
+    "theme": {
+        "bg": "#1e1e2e",
+        "fg": "#cdd6f4",
+        "sidebar": "#181825",
+        "selection": "#45475a",
+        "comment": "#6c7086",
+        "keyword": "#cba6f7",
+        "string": "#a6e3a1",
+        "function": "#89b4fa"
+    },
+    "editor": {
+        "font_family": "Consolas",
+        "font_size": 13,
+        "show_line_numbers": true,
+        "cursor_blinking": true,
+        "encoding": "utf-8",
+        "enable_autocomplete": true,
+        "enable_syntax_highlighting": true
+    },
+    "app": {
+        "auto_save": true,
+        "theme_name": "Default Dark"
+    },
+    "keybinds": {
+        "sidebar_toggle": "Ctrl+B",
+        "command_palette": "Ctrl+K, Ctrl+Space",
+        "save": "Ctrl+S",
+        "open": "Ctrl+O",
+        "new_tab": "Ctrl+T",
+        "close_tab": "Ctrl+W",
+        "rename_tab": "Ctrl+R"
+    },
+    "behavior": {
+        "enable_command_undo": true
+    }
+}

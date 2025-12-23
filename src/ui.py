@@ -1,0 +1,2702 @@
+import os
+import time
+import re
+import datetime 
+import shutil 
+from PyQt6.QtCore import QUrl
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QFrame, QLabel, QListWidget, QLineEdit, 
+                             QToolBar, QFileDialog, QDialog, QMenu, QToolButton, 
+                             QStyle, QFormLayout, QDialogButtonBox, QTabWidget, QTableWidget, 
+                             QTableWidgetItem, QHeaderView, QAbstractItemView, QComboBox, 
+                             QApplication, QCheckBox, QListWidgetItem, QScrollBar, 
+                             QPushButton, QInputDialog, QMessageBox,
+                             QFontComboBox, QListView, QGraphicsDropShadowEffect)
+from PyQt6.QtGui import (QAction, QFont, QKeySequence, QIcon, QColor, QPainter, QPen, 
+                         QPixmap, QPolygon, QShortcut, QMouseEvent, QFontDatabase, QIntValidator)
+from PyQt6.QtCore import (Qt, QSize, QPointF, QPropertyAnimation, QEasingCurve, QPoint, QRect, 
+                          QEvent, QTimer, QObject, QModelIndex, QVariantAnimation, 
+                          QParallelAnimationGroup, QThread, pyqtSignal)
+from PyQt6.QtGui import QMouseEvent, QCursor
+from .editor import ZenithEditor
+from .core import BUS, CONFIG, save_config
+
+
+# --- GLOBAL ICON CACHE ---
+class GlobalIconCache:
+    _cache = {}
+
+    @classmethod
+    def get_icon(cls, shape, color, size=24):
+        key = (shape, color, size)
+        if key not in cls._cache:
+            cls._cache[key] = cls._create_icon_impl(shape, color, size)
+        return cls._cache[key]
+
+    @staticmethod
+    def _create_icon_impl(shape="x", color="#6c7086", size=24):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        pen_width = 2
+        if "arrow" in shape: pen_width = 2.5
+        if "search" in shape: pen_width = 2.0
+            
+        pen = QPen(QColor(color))
+        pen.setWidthF(pen_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        
+        m = int(size * 0.28)
+        if m < 4: m = 4
+        c = size // 2
+        
+        if shape == "x":
+            painter.drawLine(m, m, size-m, size-m)
+            painter.drawLine(size-m, m, m, size-m)
+        elif shape == "plus":
+            painter.drawLine(c, m, c, size-m)
+            painter.drawLine(m, c, size-m, c) 
+        elif shape == "minus":
+            painter.drawLine(m, c, size-m, c)
+        
+        # --- SEARCH ICON FIX ---
+        elif shape == "search":
+            glass_size = int(size * 0.35)
+            # Center the circle slightly better
+            cx = int(size * 0.40)
+            cy = int(size * 0.40)
+            painter.drawEllipse(QPoint(cx, cy), glass_size, glass_size)
+            
+            # Handle math
+            offset = int(glass_size * 0.7)
+            handle_start_x = cx + offset
+            handle_start_y = cy + offset
+            handle_end_x = size - m + 1
+            handle_end_y = size - m + 1
+            painter.drawLine(handle_start_x, handle_start_y, handle_end_x, handle_end_y)
+
+        elif shape == "rename_box":
+            # Fix rect drawing to ensure it fits
+            box_rect = QRect(3, 5, size - 7, size - 10)
+            painter.drawRoundedRect(box_rect, 2, 2)
+            
+            cursor_pen = QPen(QColor(color))
+            cursor_pen.setWidth(2)
+            painter.setPen(cursor_pen)
+            
+            cx_cursor = size // 2
+            top_y = 9
+            bot_y = size - 9
+            
+            # Draw I-beam cursor inside box
+            painter.drawLine(cx_cursor, top_y, cx_cursor, bot_y)
+            cap_size = 2
+            painter.drawLine(cx_cursor - cap_size, top_y, cx_cursor + cap_size, top_y)
+            painter.drawLine(cx_cursor - cap_size, bot_y, cx_cursor + cap_size, bot_y)
+
+        elif shape == "arrow_down":
+             path = QPolygon([QPoint(m, c-3), QPoint(c, size-m-1), QPoint(size-m, c-3)])
+             painter.drawPolyline(path)
+        elif shape == "arrow_up":
+             path = QPolygon([QPoint(m, c+3), QPoint(c, m+1), QPoint(size-m, c+3)])
+             painter.drawPolyline(path)
+             
+        painter.end()
+        return QIcon(pixmap)
+
+def create_icon(shape="x", color="#6c7086", size=24):
+    return GlobalIconCache.get_icon(shape, color, size)
+
+# --- FILE LOADER THREAD ---
+class FileLoadWorker(QThread):
+    finished_loading = pyqtSignal(str, str, bool) 
+
+    def __init__(self, filepath, encoding):
+        super().__init__()
+        self.filepath = filepath
+        self.encoding = encoding
+
+    def run(self):
+        try:
+            with open(self.filepath, 'r', encoding=self.encoding) as f:
+                content = f.read()
+            self.finished_loading.emit(self.filepath, content, True)
+        except Exception as e:
+            self.finished_loading.emit(self.filepath, str(e), False)
+
+# --- CUSTOM WIDGETS ---
+class CleanHoverListView(QListView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setUniformItemSizes(True)
+        self.setLayoutMode(QListView.LayoutMode.Batched)
+        self.viewport().installEventFilter(self)
+
+    def showEvent(self, event):
+        if self.window(): self.window().installEventFilter(self)
+        super().showEvent(event)
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.Leave:
+            if source is self.viewport() or source is self.window():
+                global_pos = QCursor.pos()
+                if not self.geometry().contains(self.mapFromGlobal(global_pos)):
+                    self.clearSelection()
+                    if self.selectionModel(): self.selectionModel().clearCurrentIndex()
+                    self.viewport().update()
+        return super().eventFilter(source, event)
+     
+class SidebarListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+    def leaveEvent(self, event):
+        self.viewport().update()
+        super().leaveEvent(event)         
+
+# --- ANIMATED OVERLAY BARS (FIND / GOTO) ---
+class EditorOverlayBar(QFrame):
+    """Base class for floating bars over the editor"""
+    def __init__(self, parent_editor):
+        super().__init__(parent_editor)
+        self.editor = parent_editor
+        self.setFixedHeight(50) # Default, override in subclasses if needed
+        self.setFixedWidth(400)
+        self.hide()
+        
+        # Style
+        self.setObjectName("OverlayBar")
+        bg = CONFIG['theme']['sidebar']
+        border = CONFIG['theme']['selection']
+        fg = CONFIG['theme']['fg']
+        self.setStyleSheet(f"""
+            #OverlayBar {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-top: none;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }}
+            QLabel {{ color: {fg}; font-weight: 500; font-size: 13px; border: none; background: transparent; }}
+            QLineEdit {{
+                background-color: rgba(255, 255, 255, 0.05);
+                border: 1px solid {border};
+                border-radius: 4px;
+                color: {fg};
+                padding: 4px 8px;
+                selection-background-color: {CONFIG['theme']['function']};
+            }}
+            QLineEdit:focus {{ border: 1px solid {CONFIG['theme']['function']}; }}
+        """)
+        
+        # Shadow
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
+        
+        # Animation
+        self.anim = QPropertyAnimation(self, b"pos")
+        self.anim.setDuration(250)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def update_position(self):
+        # Top right corner
+        parent_width = self.parent().width()
+        if self.isVisible():
+            self.move(parent_width - self.width() - 25, 0)
+
+    def show_animated(self):
+        if self.isVisible(): 
+            self.update_limits_if_needed() 
+            if hasattr(self, 'input'):
+                self.input.setFocus() 
+                self.input.selectAll()
+            return
+        
+        parent_width = self.parent().width()
+        
+        # 1. Force position to "Hidden" state (Above view)
+        start_x = parent_width - self.width() - 25
+        start_y = -self.height() - 10
+        self.move(start_x, start_y)
+        
+        self.update_limits_if_needed()
+        self.show()
+        self.raise_()
+        
+        # 2. Animate to "Visible" state (Top edge)
+        end_pos = QPoint(start_x, 0)
+        
+        self.anim.stop() 
+        self.anim.setStartValue(QPoint(start_x, start_y))
+        self.anim.setEndValue(end_pos)
+        
+        try: self.anim.finished.disconnect()
+        except: pass
+        
+        self.anim.start()
+        if hasattr(self, 'input'):
+            self.input.setFocus()
+            self.input.selectAll()
+        
+    def hide_animated(self):
+        if not self.isVisible(): return
+        
+        current_pos = self.pos()
+        end_pos = QPoint(current_pos.x(), -self.height() - 10)
+        
+        self.anim.stop()
+        self.anim.setStartValue(current_pos)
+        self.anim.setEndValue(end_pos)
+        
+        try: self.anim.finished.disconnect()
+        except: pass
+        
+        self.anim.finished.connect(self.hide)
+        self.anim.start()
+        self.editor.setFocus()
+
+    def update_limits_if_needed(self):
+        pass
+
+class FindBar(EditorOverlayBar):
+    def __init__(self, parent_editor):
+        super().__init__(parent_editor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(8)
+        
+        self.icon = QLabel()
+        self.icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], 16).pixmap(16, 16))
+        
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Find...")
+        self.input.textChanged.connect(self.find_text)
+        self.input.returnPressed.connect(self.find_next)
+        
+        btn_style = f"""
+            QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 4px; }}
+            QToolButton:hover {{ background: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
+            QToolButton:pressed {{ background: {CONFIG['theme']['function']}; }}
+        """
+        
+        self.btn_prev = QToolButton()
+        self.btn_prev.setIcon(create_icon("arrow_up", CONFIG['theme']['fg'], 16))
+        self.btn_prev.setToolTip("Previous Match")
+        self.btn_prev.setStyleSheet(btn_style)
+        self.btn_prev.clicked.connect(self.find_prev)
+        
+        self.btn_next = QToolButton()
+        self.btn_next.setIcon(create_icon("arrow_down", CONFIG['theme']['fg'], 16))
+        self.btn_next.setToolTip("Next Match")
+        self.btn_next.setStyleSheet(btn_style)
+        self.btn_next.clicked.connect(self.find_next)
+        
+        self.btn_close = QToolButton()
+        self.btn_close.setIcon(create_icon("x", CONFIG['theme']['fg'], 14))
+        self.btn_close.setToolTip("Close")
+        self.btn_close.setStyleSheet(btn_style)
+        self.btn_close.clicked.connect(self.hide_animated)
+        
+        layout.addWidget(self.icon)
+        layout.addWidget(self.input)
+        layout.addWidget(self.btn_prev)
+        layout.addWidget(self.btn_next)
+        layout.addWidget(self.btn_close)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide_animated()
+            return
+        super().keyPressEvent(event)
+        
+    def find_text(self):
+        text = self.input.text()
+        if not text: return
+        self.editor.findFirst(text, False, False, False, True, True)
+        
+    def find_next(self):
+        text = self.input.text()
+        if not text: return
+        self.editor.findFirst(text, False, False, False, True, True)
+        
+    def find_prev(self):
+        text = self.input.text()
+        if not text: return
+        
+        # Move Caret to start of selection to prevent getting stuck
+        if self.editor.hasSelectedText():
+            lf, if_, _, _ = self.editor.getSelection()
+            if lf != -1:
+                self.editor.setCursorPosition(lf, if_)
+        
+        self.editor.findFirst(text, False, False, False, True, False)
+
+class GoToBar(EditorOverlayBar):
+    def __init__(self, parent_editor):
+        super().__init__(parent_editor)
+        self.setFixedWidth(280)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 5, 15, 5)
+        layout.setSpacing(10)
+        
+        lbl = QLabel("Go to Line:")
+        
+        self.input = QLineEdit()
+        self.input.setValidator(QIntValidator(1, 999999))
+        self.input.setPlaceholderText("Line #")
+        self.input.returnPressed.connect(self.go_to_line)
+        
+        btn_style = f"""
+            QPushButton {{ background: {CONFIG['theme']['sidebar']}; border: 1px solid {CONFIG['theme']['selection']}; color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 4px 10px; }}
+            QPushButton:hover {{ background: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
+        """
+        
+        self.btn_go = QPushButton("Go")
+        self.btn_go.setStyleSheet(btn_style)
+        self.btn_go.clicked.connect(self.go_to_line)
+        
+        self.btn_close = QToolButton()
+        self.btn_close.setIcon(create_icon("x", CONFIG['theme']['fg'], 14))
+        self.btn_close.setStyleSheet(f"QToolButton {{ background: transparent; border: none; border-radius: 4px; }} QToolButton:hover {{ background: #ff5555; }}")
+        self.btn_close.clicked.connect(self.hide_animated)
+        
+        layout.addWidget(lbl)
+        layout.addWidget(self.input)
+        layout.addWidget(self.btn_go)
+        layout.addWidget(self.btn_close)
+
+    def update_limits_if_needed(self):
+        max_lines = self.editor.lines()
+        self.input.setPlaceholderText(f"1 - {max_lines}")
+        if self.input.validator():
+            self.input.validator().setTop(max_lines)
+
+    def show_animated(self):
+        self.input.clear()
+        super().show_animated()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide_animated()
+            return
+        super().keyPressEvent(event)
+
+    def go_to_line(self):
+        try:
+            line = int(self.input.text())
+            self.editor.setCursorPosition(line - 1, 0)
+            self.editor.setFocus()
+            self.hide_animated()
+        except ValueError:
+            pass
+
+class GlobalSearchBar(EditorOverlayBar):
+    def __init__(self, parent_editor, main_window_ref):
+        super().__init__(parent_editor)
+        self.main_window = main_window_ref
+        
+        # Initialize geometry
+        self.setFixedHeight(50) 
+        self.setFixedWidth(500) 
+        
+        # Main vertical layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # --- Top Section (Input) ---
+        top_container = QWidget()
+        top_container.setFixedHeight(50)
+        
+        # Bottom border only
+        top_container.setStyleSheet(f"""
+            background-color: {CONFIG['theme']['sidebar']};
+            border-bottom: 1px solid {CONFIG['theme']['selection']};
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+        """)
+        
+        top_layout = QHBoxLayout(top_container)
+        top_layout.setContentsMargins(10, 0, 10, 0)
+        top_layout.setSpacing(10)
+
+        self.icon = QLabel()
+        self.icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], 16).pixmap(16, 16))
+        
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Search all open files...")
+        
+        # Input Box Style
+        bg_color = "rgba(255, 255, 255, 0.05)"
+        border_col = CONFIG['theme']['selection']
+        fg_col = CONFIG['theme']['fg']
+        focus_col = CONFIG['theme']['function']
+        
+        self.input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {bg_color};
+                color: {fg_col};
+                border: 1px solid {border_col};
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 13px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {focus_col};
+            }}
+        """)
+        
+        self.input.textChanged.connect(self.perform_search)
+        self.input.returnPressed.connect(self.activate_current_result)
+        
+        self.btn_close = QToolButton()
+        self.btn_close.setIcon(create_icon("x", CONFIG['theme']['fg'], 14))
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setStyleSheet(f"QToolButton {{ background: transparent; border: none; border-radius: 4px; padding: 4px; }} QToolButton:hover {{ background: #ff5555; }}")
+        self.btn_close.clicked.connect(self.hide_animated)
+        
+        top_layout.addWidget(self.icon)
+        top_layout.addWidget(self.input)
+        top_layout.addWidget(self.btn_close)
+        
+        layout.addWidget(top_container)
+        
+        # --- Bottom Section (Results List) ---
+        self.results_list = QListWidget()
+        self.results_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.results_list.itemClicked.connect(self.on_item_clicked)
+        self.results_list.hide() 
+        
+        # Results styling
+        self.results_list.setStyleSheet(f"""
+            QListWidget {{ 
+                background-color: {CONFIG['theme']['bg']}; 
+                border: none; 
+                outline: none;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }}
+            QListWidget::item {{ 
+                padding: 8px; 
+                border-bottom: 1px solid {CONFIG['theme']['selection']};
+                color: {CONFIG['theme']['fg']};
+            }}
+            QListWidget::item:selected {{ 
+                background-color: {CONFIG['theme']['selection']}; 
+                color: white;
+                border-left: 3px solid {CONFIG['theme']['function']};
+            }}
+            QListWidget::item:hover:!selected {{
+                background-color: {CONFIG['theme']['sidebar']};
+            }}
+            {SCROLLBAR_CSS}
+        """)
+        apply_smooth_scroll(self.results_list)
+        
+        layout.addWidget(self.results_list)
+
+    def show_animated(self):
+        self.input.clear()
+        self.results_list.clear()
+        self.results_list.hide()
+        self.setFixedHeight(50)
+        super().show_animated()
+
+    def perform_search(self, text):
+        self.results_list.clear()
+        
+        if not text: 
+            self.animate_height(50) 
+            self.results_list.hide()
+            return
+        
+        search_term = text.lower()
+        
+        if self.main_window.last_active_filename:
+            self.main_window.file_states[self.main_window.last_active_filename] = self.main_window.editor.text()
+            
+        found_count = 0
+        for filename, content in self.main_window.file_states.items():
+            if not content: continue
+            if found_count >= 50: break
+
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if search_term in line.lower():
+                    stripped = line.strip()
+                    if len(stripped) > 60: stripped = stripped[:60] + "..."
+                    
+                    display_text = f"{os.path.basename(filename)}:{i+1}  |  {stripped}"
+                    item = QListWidgetItem(display_text)
+                    item.setData(Qt.ItemDataRole.UserRole, (filename, i))
+                    self.results_list.addItem(item)
+                    
+                    found_count += 1
+                    if found_count >= 50: break 
+        
+        item_count = self.results_list.count()
+        if item_count > 0:
+            self.results_list.setCurrentRow(0)
+            self.results_list.show()
+            
+            # --- FIX: Scrollbar Policy & Exact Height ---
+            
+            # 1. Disable scrollbar if items fit perfectly (<= 6)
+            if item_count <= 6:
+                self.results_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            else:
+                self.results_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            
+            # 2. Get exact row height from the list widget itself
+            row_height = self.results_list.sizeHintForRow(0)
+            if row_height <= 0: row_height = 36 # Fallback if not yet rendered
+            
+            # 3. Calculate exact visible height
+            visible_items = min(item_count, 6)
+            list_height = visible_items * row_height
+            
+            # 4. Total height = Header (50) + List
+            total_height = 50 + list_height
+            
+            self.animate_height(total_height)
+        else:
+            self.animate_height(50)
+            self.results_list.hide()
+
+    def animate_height(self, target_h):
+        if self.height() == target_h: return
+        
+        if hasattr(self, 'h_anim'): self.h_anim.stop()
+        
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215) 
+             
+        self.h_anim = QPropertyAnimation(self, b"geometry")
+        self.h_anim.setDuration(200)
+        self.h_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        start_rect = self.geometry()
+        end_rect = QRect(start_rect)
+        end_rect.setHeight(target_h)
+        
+        self.h_anim.setStartValue(start_rect)
+        self.h_anim.setEndValue(end_rect)
+        self.h_anim.start()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide_animated()
+            return
+        if self.results_list.isVisible() and self.results_list.count() > 0:
+            if event.key() == Qt.Key.Key_Down:
+                idx = self.results_list.currentRow()
+                if idx < self.results_list.count() - 1: self.results_list.setCurrentRow(idx + 1)
+                return
+            elif event.key() == Qt.Key.Key_Up:
+                idx = self.results_list.currentRow()
+                if idx > 0: self.results_list.setCurrentRow(idx - 1)
+                return
+        super().keyPressEvent(event)
+
+    def activate_current_result(self):
+        item = self.results_list.currentItem()
+        if item: self.on_item_clicked(item)
+
+    def on_item_clicked(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data:
+            filename, line_index = data
+            self.main_window.open_file_at_line(filename, line_index)
+            self.hide_animated()
+
+# --- SMOOTH SCROLL DELEGATE (Helpers) ---
+class SmoothScrollDelegate(QObject):
+    def __init__(self, target_widget):
+        super().__init__(target_widget)
+        self.widget = target_widget
+        self.scroll_bar = None
+        if hasattr(target_widget, "verticalScrollBar"):
+            self.scroll_bar = target_widget.verticalScrollBar()
+        elif isinstance(target_widget, QAbstractItemView):
+            self.scroll_bar = target_widget.verticalScrollBar()
+        if self.scroll_bar:
+            if hasattr(self.widget, 'viewport'):
+                 self.widget.viewport().installEventFilter(self)
+            else:
+                 self.widget.installEventFilter(self)
+        self.current_scroll = 0  
+        self.target_scroll = 0
+        self.timer = QTimer()
+        self.timer.setInterval(12) 
+        self.timer.timeout.connect(self.update_scroll)
+        if isinstance(target_widget, ZenithEditor): self.step_size = 6 
+        else: self.step_size = 60
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.Wheel and self.scroll_bar and self.scroll_bar.maximum() > 0:
+            delta = event.angleDelta().y()
+            if delta == 0: return False
+            if not self.timer.isActive():
+                self.current_scroll = self.scroll_bar.value()
+                self.target_scroll = self.current_scroll
+            steps = delta / 120.0
+            self.target_scroll -= (steps * self.step_size)
+            self.target_scroll = max(self.scroll_bar.minimum(), min(self.target_scroll, self.scroll_bar.maximum()))
+            if not self.timer.isActive(): self.timer.start()
+            return True
+        elif event.type() == QEvent.Type.Leave:
+             if self.timer.isActive(): self.timer.stop()
+        return False
+
+    def update_scroll(self):
+        diff = self.target_scroll - self.current_scroll
+        if abs(diff) < 1:
+            self.current_scroll = self.target_scroll
+            self.scroll_bar.setValue(int(self.current_scroll))
+            self.timer.stop()
+        else:
+            self.current_scroll += diff * 0.15
+            self.scroll_bar.setValue(int(self.current_scroll))
+        if isinstance(self.widget, QAbstractItemView) and hasattr(self.widget, 'viewport'):
+            viewport = self.widget.viewport()
+            if viewport.underMouse():
+                local_pos = viewport.mapFromGlobal(QCursor.pos())
+                if viewport.rect().contains(local_pos):
+                    mouse_event = QMouseEvent(QEvent.Type.MouseMove, QPointF(local_pos), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+                    QApplication.sendEvent(viewport, mouse_event)
+
+def apply_smooth_scroll(widget):
+    if isinstance(widget, QComboBox):
+        widget.setMaxVisibleItems(100)
+        widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        return
+    target = widget
+    if hasattr(widget, "view") and isinstance(widget.view(), QAbstractItemView): target = widget.view()
+    target._scroller = SmoothScrollDelegate(target)
+
+def colorize_icon(icon, color):
+    pixmap = icon.pixmap(QSize(24, 24))
+    painter = QPainter(pixmap)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(pixmap.rect(), color)
+    painter.end()
+    return QIcon(pixmap)
+
+# --- SCROLLBAR CSS ---
+SCROLLBAR_CSS = f"""
+    QAbstractScrollArea::corner {{ background: transparent; border: none; }}
+    QScrollBar:vertical {{
+        border: none;
+        background: {CONFIG['theme']['sidebar']};
+        width: 14px;
+        margin: 0px; 
+        border-left: 1px solid {CONFIG['theme']['selection']};
+    }}
+    QScrollBar::handle:vertical {{
+        background: {CONFIG['theme']['function']};
+        min-height: 20px;
+        border-radius: 4px; 
+        margin: 2px 3px 2px 3px; 
+    }}
+    QScrollBar::handle:vertical:hover {{ background: #8caaee; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+    QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {{
+        height: 0px; width: 0px; background: none; border: none; image: none;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+"""
+
+# --- EXPLORER SPECIFIC SCROLLBAR ---
+EXPLORER_SCROLLBAR_CSS = f"""
+    QScrollBar:vertical {{
+        border: none;
+        background: transparent;
+        width: 14px; 
+        margin: 16px 0 16px 0; 
+    }}
+    QScrollBar::handle:vertical {{
+        background: {CONFIG['theme']['function']};
+        min-height: 20px;
+        border-radius: 4px;
+        margin: 0px 4px 0px 4px; 
+    }}
+    QScrollBar::handle:vertical:hover {{ background: #8caaee; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0px; background: none;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+"""
+
+COMBO_STYLE = f"""
+    QComboBox {{
+        background-color: {CONFIG['theme']['sidebar']};
+        color: {CONFIG['theme']['fg']};
+        border: 1px solid {CONFIG['theme']['selection']};
+        border-radius: 6px;
+        padding: 5px 12px;
+        font-size: 13px;
+    }}
+    QComboBox:hover, QComboBox:on {{
+        border: 1px solid {CONFIG['theme']['function']};
+        background-color: {CONFIG['theme']['bg']};
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 25px;
+        border: none;
+        background: transparent;
+    }}
+    QComboBox::down-arrow {{ image: none; border: none; width: 0px; height: 0px; }}
+    QComboBox QAbstractItemView {{
+        background-color: {CONFIG['theme']['sidebar']};
+        border: 1px solid {CONFIG['theme']['selection']};
+        outline: none;
+        padding: 2px;
+        border-radius: 4px;
+        color: {CONFIG['theme']['fg']};
+    }}
+    QComboBox QAbstractItemView::item {{
+        height: 30px;
+        color: {CONFIG['theme']['fg']};
+        padding-left: 8px;
+        border-radius: 4px;
+    }}
+    QComboBox QAbstractItemView::item:selected, 
+    QComboBox QAbstractItemView::item:hover {{
+        background-color: {CONFIG['theme']['function']};
+        color: {CONFIG['theme']['bg']};
+    }}
+"""
+
+class ThemedComboBox(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        view = CleanHoverListView(self)
+        view.setStyleSheet(f"""
+            QListView {{
+                background-color: {CONFIG['theme']['sidebar']};
+                border: 1px solid {CONFIG['theme']['selection']};
+                outline: none;
+            }}
+            {SCROLLBAR_CSS}
+        """)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setView(view)
+        apply_smooth_scroll(view)
+        self.setStyleSheet(COMBO_STYLE + "\nQComboBox { combobox-popup: 0; }")
+        self._popup_anim = None
+        self._is_closing = False
+
+    def showPopup(self):
+        super().showPopup()
+        popup = self.view().window()
+        if not popup: return
+        popup.setObjectName("PopupWrapper")
+        popup.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        popup.setStyleSheet(f"""
+            #PopupWrapper {{ 
+                background-color: {CONFIG['theme']['sidebar']}; 
+                border: 1px solid {CONFIG['theme']['function']}; 
+                border-radius: 4px; 
+            }}
+            {SCROLLBAR_CSS}
+        """)
+        gp = self.mapToGlobal(QPoint(0, self.height()))
+        target_rect = popup.geometry()
+        target_rect.moveTopLeft(gp)
+        start_rect = QRect(target_rect); start_rect.setHeight(0)
+        popup.setGeometry(start_rect)
+        popup.show()
+        if not self._popup_anim:
+            self._popup_anim = QPropertyAnimation(popup, b"geometry", self)
+            self._popup_anim.setDuration(150)
+            self._popup_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        try: self._popup_anim.finished.disconnect()
+        except: pass
+        self._popup_anim.setStartValue(start_rect)
+        self._popup_anim.setEndValue(target_rect)
+        self._popup_anim.start()
+
+    def hidePopup(self):
+        if self._is_closing: return
+        popup = self.view().window()
+        if not popup: super().hidePopup(); return
+        self._is_closing = True
+        start_rect = popup.geometry()
+        target_rect = QRect(start_rect)
+        target_rect.setHeight(0)
+        if not self._popup_anim: 
+            self._popup_anim = QPropertyAnimation(popup, b"geometry", self)
+            self._popup_anim.setDuration(150)
+        self._popup_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+        self._popup_anim.setStartValue(start_rect)
+        self._popup_anim.setEndValue(target_rect)
+        try: self._popup_anim.finished.disconnect()
+        except: pass
+        self._popup_anim.finished.connect(self._finish_close)
+        self._popup_anim.start()
+
+    def _finish_close(self): super().hidePopup(); self._is_closing = False
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        arrow_color = QColor(CONFIG['theme']['fg'])
+        if self.underMouse(): arrow_color = QColor(CONFIG['theme']['function'])
+        pen = QPen(arrow_color, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        rect = self.rect(); x = rect.width() - 20; y = rect.height() // 2
+        path = QPolygon([QPoint(x - 5, y - 2), QPoint(x, y + 3), QPoint(x + 5, y - 2)])
+        painter.drawPolyline(path)
+
+class ThemedFontComboBox(QFontComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        view = CleanHoverListView(self)
+        view.setStyleSheet(f"""
+            QListView {{
+                background-color: {CONFIG['theme']['sidebar']};
+                border: 1px solid {CONFIG['theme']['selection']};
+                outline: none;
+            }}
+            {SCROLLBAR_CSS}
+        """)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setView(view)
+        apply_smooth_scroll(view)
+        self.setStyleSheet(COMBO_STYLE + """
+            QFontComboBox::drop-down { border: none; background: transparent; }
+            QFontComboBox::down-arrow { image: none; border: none; width: 0px; height: 0px; }
+        """)
+        self.setMaxVisibleItems(10)
+        self._popup_anim = None
+        self._is_closing = False
+         
+    def showPopup(self):
+        super().showPopup()
+        popup = self.view().window()
+        if not popup: return
+        popup.setObjectName("PopupWrapper")
+        popup.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        popup.setStyleSheet(f"""
+            #PopupWrapper {{ 
+                background-color: {CONFIG['theme']['sidebar']}; 
+                border: 1px solid {CONFIG['theme']['function']}; 
+                border-radius: 4px; 
+            }}
+            {SCROLLBAR_CSS}
+        """)
+        gp = self.mapToGlobal(QPoint(0, self.height()))
+        target_rect = popup.geometry()
+        target_rect.moveTopLeft(gp)
+        start_rect = QRect(target_rect); start_rect.setHeight(0)
+        popup.setGeometry(start_rect); popup.show()
+        if not self._popup_anim:
+            self._popup_anim = QPropertyAnimation(popup, b"geometry", self)
+            self._popup_anim.setDuration(150)
+            self._popup_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        try: self._popup_anim.finished.disconnect()
+        except: pass
+        self._popup_anim.setStartValue(start_rect)
+        self._popup_anim.setEndValue(target_rect)
+        self._popup_anim.start()
+
+    def hidePopup(self):
+        if self._is_closing: return
+        popup = self.view().window()
+        if not popup: super().hidePopup(); return
+        self._is_closing = True
+        start_rect = popup.geometry(); target_rect = QRect(start_rect); target_rect.setHeight(0)
+        if not self._popup_anim: 
+            self._popup_anim = QPropertyAnimation(popup, b"geometry", self)
+            self._popup_anim.setDuration(150)
+        self._popup_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+        self._popup_anim.setStartValue(start_rect)
+        self._popup_anim.setEndValue(target_rect)
+        try: self._popup_anim.finished.disconnect()
+        except: pass
+        self._popup_anim.finished.connect(self._finish_close)
+        self._popup_anim.start()
+
+    def _finish_close(self): super().hidePopup(); self._is_closing = False
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        arrow_color = QColor(CONFIG['theme']['fg'])
+        if self.underMouse(): arrow_color = QColor(CONFIG['theme']['function'])
+        pen = QPen(arrow_color, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        rect = self.rect(); x = rect.width() - 20; y = rect.height() // 2
+        path = QPolygon([QPoint(x - 5, y - 2), QPoint(x, y + 3), QPoint(x + 5, y - 2)])
+        painter.drawPolyline(path)
+
+class ModernSpinBox(QWidget):
+    def __init__(self, value=12, min_val=8, max_val=72):
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0,0,0,0)
+        layout.setSpacing(2)
+        self.min_val, self.max_val, self.current_value = min_val, max_val, value
+        self.display = QLabel(str(self.current_value))
+        self.display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.display.setStyleSheet(f"background: {CONFIG['theme']['sidebar']}; color: {CONFIG['theme']['fg']}; border: 1px solid {CONFIG['theme']['selection']}; border-radius: 4px; padding: 4px; min-width: 40px;")
+        btn_style = f"QToolButton {{ background: {CONFIG['theme']['sidebar']}; border: 1px solid {CONFIG['theme']['selection']}; border-radius: 4px; }} QToolButton:hover {{ background: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }} QToolButton:pressed {{ background: {CONFIG['theme']['function']}; color: {CONFIG['theme']['bg']}; }}"
+        self.btn_minus = QToolButton()
+        self.btn_minus.setIcon(create_icon("minus", CONFIG['theme']['fg']))
+        self.btn_minus.setStyleSheet(btn_style)
+        self.btn_minus.clicked.connect(self.decrement)
+        self.btn_plus = QToolButton()
+        self.btn_plus.setIcon(create_icon("plus", CONFIG['theme']['fg']))
+        self.btn_plus.setStyleSheet(btn_style)
+        self.btn_plus.clicked.connect(self.increment)
+        layout.addWidget(self.btn_minus)
+        layout.addWidget(self.display)
+        layout.addWidget(self.btn_plus)
+        layout.addStretch()
+    def increment(self):
+        if self.current_value < self.max_val: 
+            self.current_value += 1
+            self.display.setText(str(self.current_value))
+    def decrement(self):
+        if self.current_value > self.min_val: 
+            self.current_value -= 1
+            self.display.setText(str(self.current_value))
+    def value(self): return self.current_value
+
+class ExplorerItemWidget(QWidget):
+    def __init__(self, text, item_ref, main_window, is_new=False):
+        super().__init__()
+        self.item_ref = item_ref
+        self.main_window = main_window
+        self.clean_text = text
+        self.is_dirty = False
+        self.is_new = is_new # Store "is_new" status
+        self.is_active_selection = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 2, 4, 2)
+        layout.setSpacing(2)
+        self.label = QLabel(text)
+        default_col = CONFIG['theme']['fg']
+        self.label.setStyleSheet(f"background: transparent; border: none; color: {default_col}; font-weight: 500;")
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents) 
+        self.btn_rename = QToolButton()
+        self.btn_rename.setFixedSize(26, 26)
+        self.btn_rename.setIconSize(QSize(20, 20))
+        self.btn_rename.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_rename.setToolTip("Rename Tab")
+        self.btn_rename.clicked.connect(self.rename_clicked)
+        self.btn_close = QToolButton()
+        self.btn_close.setFixedSize(26, 26)
+        self.btn_close.setIconSize(QSize(18, 18))
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.clicked.connect(self.close_clicked)
+        layout.addWidget(self.label)
+        layout.addStretch()
+        layout.addWidget(self.btn_rename)
+        layout.addWidget(self.btn_close)
+         
+        # FIX #7: Use cached icons initially
+        default_icon_col = CONFIG['theme']['comment']
+        self.btn_rename.setIcon(create_icon("rename_box", default_icon_col, size=24))
+        self.btn_close.setIcon(create_icon("x", default_icon_col, size=18))
+        self.set_selected_visuals(False)
+        self.update_label_style() 
+
+    def set_dirty(self, dirty): 
+        self.is_dirty = dirty
+        self.update_label_style()
+        if dirty:
+            suffix = " **" if self.is_new else " *"
+            self.label.setText(f"{self.clean_text}{suffix}")
+        else:
+            self.label.setText(self.clean_text)
+
+    def update_label_style(self):
+        selected = self.is_selected()
+        font_weight = "bold" if selected else "500"
+        font_style = "italic" if self.is_dirty else "normal"
+        if selected: color = CONFIG['theme']['bg'] 
+        else: color = CONFIG['theme']['fg'] 
+        self.label.setStyleSheet(f"background: transparent; border: none; color: {color}; font-weight: {font_weight}; font-style: {font_style};")
+
+    def set_selected_visuals(self, selected):
+        self.is_active_selection = selected
+        self.update_label_style()
+        icon_col = "#ffffff" if selected else CONFIG['theme']['comment']
+        rename_hover = "rgba(0, 0, 0, 0.3)" if selected else "rgba(255, 255, 255, 0.15)"
+        
+        # FIX #7: Reuse cached icons
+        self.btn_rename.setIcon(create_icon("rename_box", icon_col, size=24))
+        self.btn_close.setIcon(create_icon("x", icon_col, size=18))
+        
+        self.btn_rename.setStyleSheet(f"QToolButton {{ border: none; background: transparent; border-radius: 4px; }} QToolButton:hover {{ background-color: {rename_hover}; }}")
+        self.btn_close.setStyleSheet(f"QToolButton {{ border: none; background: transparent; border-radius: 4px; }} QToolButton:hover {{ background-color: #ff5555; }}")
+        self.btn_rename.style().unpolish(self.btn_rename)
+        self.btn_rename.style().polish(self.btn_rename)
+        self.btn_close.style().unpolish(self.btn_close)
+        self.btn_close.style().polish(self.btn_close)
+        
+    def is_selected(self): return hasattr(self, 'is_active_selection') and self.is_active_selection
+    def close_clicked(self): self.main_window.close_explorer_tab(self.item_ref)
+    def rename_clicked(self): self.main_window.rename_current_tab()
+    def text(self): return self.clean_text
+    def set_text(self, text): 
+        self.clean_text = text
+        self.set_dirty(self.is_dirty) 
+
+# --- MODERN INPUT DIALOG ---
+class ModernInputDialog(QDialog):
+    def __init__(self, parent=None, title="Input", label="Enter value:", text=""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setFixedWidth(350)
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {CONFIG['theme']['bg']}; color: {CONFIG['theme']['fg']}; border: 1px solid {CONFIG['theme']['selection']}; border-radius: 8px; }}
+            QLabel {{ color: {CONFIG['theme']['fg']}; font-size: 13px; font-weight: 500; margin-bottom: 5px; }}
+            QLineEdit {{ background-color: {CONFIG['theme']['sidebar']}; color: {CONFIG['theme']['fg']}; border: 1px solid {CONFIG['theme']['selection']}; border-radius: 4px; padding: 6px; font-size: 13px; }}
+            QLineEdit:focus {{ border: 1px solid {CONFIG['theme']['function']}; }}
+            QPushButton {{ background-color: {CONFIG['theme']['sidebar']}; border: 1px solid {CONFIG['theme']['selection']}; color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 6px 15px; min-width: 60px; }}
+            QPushButton:hover {{ background-color: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
+            QPushButton:pressed {{ background-color: {CONFIG['theme']['function']}; color: {CONFIG['theme']['bg']}; }}
+        """)
+        layout = QVBoxLayout(self)
+        self.lbl = QLabel(label)
+        layout.addWidget(self.lbl)
+        
+        self.input = QLineEdit()
+        self.input.setText(text)
+        self.input.selectAll()
+        layout.addWidget(self.input)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton("OK")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_ok.setDefault(True)
+        
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_ok)
+        layout.addLayout(btn_layout)
+
+    def get_text(self):
+        return self.input.text()
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Zenith Settings")
+        self.resize(550, 550)
+        self.parent_window = parent
+        
+        # Ensure all standard keybinds exist
+        self.ensure_default_keybinds()
+
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {CONFIG['theme']['bg']}; color: {CONFIG['theme']['fg']}; }}
+            QLabel {{ color: {CONFIG['theme']['fg']}; font-size: 14px; font-weight: 500; }}
+            QTabWidget::pane {{ border: 1px solid {CONFIG['theme']['selection']}; border-radius: 6px; top: -1px; background: {CONFIG['theme']['bg']}; }}
+            QTabWidget::tab-bar {{ alignment: left; }}
+            QTabBar::tab {{ background: {CONFIG['theme']['sidebar']}; color: {CONFIG['theme']['comment']}; padding: 8px 25px; border: 1px solid transparent; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; font-weight: bold; }}
+            QTabBar::tab:selected {{ background: {CONFIG['theme']['bg']}; color: {CONFIG['theme']['fg']}; border: 1px solid {CONFIG['theme']['selection']}; border-bottom: 2px solid {CONFIG['theme']['function']}; }}
+            QTabBar::tab:!selected:hover {{ background: {CONFIG['theme']['selection']}; }}
+            QCheckBox {{ color: {CONFIG['theme']['fg']}; spacing: 8px; font-size: 14px; background: transparent; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 1px solid {CONFIG['theme']['comment']}; background: {CONFIG['theme']['sidebar']}; }}
+            QCheckBox::indicator:checked {{ background-color: {CONFIG['theme']['function']}; border: 1px solid {CONFIG['theme']['function']}; }}
+             
+            QTableWidget {{ 
+                background: transparent; 
+                border: 1px solid {CONFIG['theme']['selection']};
+                border-radius: 6px;
+                gridline-color: transparent; 
+                outline: none;
+                alternate-background-color: rgba(255, 255, 255, 0.03); 
+            }}
+            QHeaderView::section {{ 
+                background-color: {CONFIG['theme']['sidebar']}; 
+                color: {CONFIG['theme']['comment']}; 
+                padding: 10px; 
+                border: none; 
+                border-bottom: 2px solid {CONFIG['theme']['selection']}; 
+                font-weight: bold;
+                text-transform: uppercase;
+                font-size: 11px;
+            }}
+            QTableWidget::item {{ 
+                padding: 8px 12px; 
+                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            }}
+            QTableWidget::item:selected {{ 
+                background-color: {CONFIG['theme']['selection']}; 
+                border: none;
+                color: white;
+            }}
+            QTableWidget:focus {{ outline: none; }}
+             
+            QPushButton {{ background-color: {CONFIG['theme']['sidebar']}; border: 1px solid {CONFIG['theme']['selection']}; color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 6px 15px; min-width: 60px; }}
+            QPushButton:hover {{ background-color: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
+            QPushButton:pressed {{ background-color: {CONFIG['theme']['function']}; color: {CONFIG['theme']['bg']}; }}
+            {SCROLLBAR_CSS}
+        """)
+        
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        
+        # --- Appearance Tab ---
+        self.tab_appearance = QWidget()
+        form_layout = QFormLayout()
+        form_layout.setSpacing(15)
+        
+        self.font_box = ThemedFontComboBox()
+        self.font_box.setCurrentFont(QFont(CONFIG["editor"]["font_family"]))
+        self.size_box = ModernSpinBox(value=max(8, CONFIG["editor"].get("font_size", 12)))
+        self.line_num_box = QCheckBox("Show Line Numbers")
+        self.line_num_box.setChecked(CONFIG["editor"].get("show_line_numbers", True))
+        self.theme_box = ThemedComboBox()
+        self.theme_box.addItems(["Default Dark", "Light", "High Contrast", "Dracula", "Monokai", "Solarized", "Nord", "Gruvbox"])
+        self.theme_box.setCurrentText(CONFIG["app"].get("theme_name", "Default Dark"))
+        self.encoding_box = ThemedComboBox()
+        self.encoding_box.addItems(["utf-8", "ascii", "cp1252", "iso-8859-1", "utf-16", "utf-32", "latin-1", "mac_roman", "windows-1250", "shift_jis"])
+        self.encoding_box.setCurrentText(CONFIG["editor"].get("encoding", "utf-8"))
+        
+        form_layout.addRow("Theme:", self.theme_box)
+        form_layout.addRow("Font Family:", self.font_box)
+        form_layout.addRow("Font Size:", self.size_box)
+        form_layout.addRow("Encoding:", self.encoding_box) 
+        form_layout.addRow("", self.line_num_box)
+        self.tab_appearance.setLayout(form_layout)
+        
+        # --- Behavior Tab ---
+        self.tab_behavior = QWidget()
+        behav_layout = QFormLayout()
+        behav_layout.setSpacing(15)
+        
+        self.cursor_blink_box = QCheckBox("Cursor Blinking")
+        self.cursor_blink_box.setChecked(CONFIG["editor"].get("cursor_blinking", True))
+        self.autosave_box = QCheckBox("Auto-Save Files")
+        self.autosave_box.setChecked(CONFIG["app"].get("auto_save", False))
+        self.syntax_highlight_box = QCheckBox("Enable System Syntax")
+        self.syntax_highlight_box.setChecked(CONFIG["editor"].get("enable_syntax_highlighting", True))
+        self.cmd_undo_box = QCheckBox("Enable Command Undo/Redo")
+        current_behavior = CONFIG.get("behavior", {})
+        self.cmd_undo_box.setChecked(current_behavior.get("enable_command_undo", False))
+        self.cmd_undo_box.setToolTip("Allows Ctrl+Z to undo actions like New Tab/Close Tab if triggered via Command Palette.")
+
+        behav_layout.addRow("", self.cursor_blink_box)
+        behav_layout.addRow("", self.autosave_box)
+        behav_layout.addRow("", self.syntax_highlight_box)
+        behav_layout.addRow("", self.cmd_undo_box)
+        self.tab_behavior.setLayout(behav_layout)
+        
+        # --- Keybinds Tab ---
+        self.tab_keys = QWidget()
+        key_layout = QVBoxLayout()
+        key_layout.setContentsMargins(0, 10, 0, 0)
+        
+        self.key_table = QTableWidget()
+        self.key_table.setColumnCount(2)
+        self.key_table.setHorizontalHeaderLabels(["COMMAND", "BINDING"])
+        self.key_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.key_table.verticalHeader().hide()
+        self.key_table.setShowGrid(False) 
+        self.key_table.setAlternatingRowColors(True) 
+        self.key_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.key_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) 
+        self.key_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers) 
+        self.key_table.itemDoubleClicked.connect(self.edit_keybind)
+        
+        # --- FIX: SCROLL PER PIXEL ---
+        # This stops the "snap to item" jumping behavior
+        self.key_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.key_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # -----------------------------
+        
+        apply_smooth_scroll(self.key_table)
+        self.populate_key_table()
+            
+        key_layout.addWidget(self.key_table)
+        self.tab_keys.setLayout(key_layout)
+        
+        self.tabs.addTab(self.tab_appearance, "Appearance")
+        self.tabs.addTab(self.tab_behavior, "Behavior")
+        self.tabs.addTab(self.tab_keys, "Keybinds")
+        layout.addWidget(self.tabs)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.apply_settings)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def ensure_default_keybinds(self):
+        defaults = {
+            "new_tab": "Ctrl+T",
+            "close_tab": "Ctrl+W",
+            "rename_tab": "Ctrl+R",
+            "open_file": "Ctrl+O",
+            "save_file": "Ctrl+S",
+            "save_as": "Ctrl+Shift+S",
+            "sidebar_toggle": "Ctrl+B",
+            "command_palette": "Ctrl+K, Ctrl+Space",
+            "find_text": "Ctrl+F",
+            "global_find": "Ctrl+Shift+F",
+            "goto_line": "Ctrl+G",
+            "copy_path": "Ctrl+Shift+C",
+            "undo": "Ctrl+Z",
+            "redo": "Ctrl+Y",
+            "cut": "Ctrl+X",
+            "copy": "Ctrl+C",
+            "paste": "Ctrl+V",
+            "select_all": "Ctrl+A",
+            "zoom_in": "Ctrl++",
+            "zoom_out": "Ctrl+-"
+        }
+        if "keybinds" not in CONFIG: CONFIG["keybinds"] = {}
+        for key, val in defaults.items():
+            if key not in CONFIG["keybinds"]: CONFIG["keybinds"][key] = val
+
+    def populate_key_table(self):
+        self.key_table.setRowCount(0)
+        row = 0
+        sorted_keys = sorted(CONFIG["keybinds"].keys())
+        for action in sorted_keys:
+            shortcut = CONFIG["keybinds"][action]
+            self.key_table.insertRow(row)
+            display_name = action.replace("_", " ").title()
+            
+            item_action = QTableWidgetItem(display_name)
+            item_action.setData(Qt.ItemDataRole.UserRole, action) 
+            self.key_table.setItem(row, 0, item_action)
+            
+            item_shortcut = QTableWidgetItem(shortcut)
+            f = QFont("Consolas") if "Consolas" in QFontDatabase.families() else QFont("Monospace")
+            f.setBold(True)
+            item_shortcut.setFont(f)
+            item_shortcut.setForeground(QColor(CONFIG['theme']['function'])) 
+            item_shortcut.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.key_table.setItem(row, 1, item_shortcut)
+            row += 1
+
+    def edit_keybind(self, item):
+        row = item.row()
+        action_name = self.key_table.item(row, 0).text()
+        current_bind = self.key_table.item(row, 1).text()
+        dlg = ModernInputDialog(self, title=f"Edit {action_name}", label="Key Binding (separate multiple with comma):", text=current_bind)
+        if dlg.exec():
+            new_bind = dlg.get_text()
+            if new_bind: self.key_table.item(row, 1).setText(new_bind)
+
+    def apply_settings(self):
+        CONFIG["editor"]["font_family"] = self.font_box.currentFont().family()
+        CONFIG["editor"]["font_size"] = max(8, self.size_box.value())
+        CONFIG["editor"]["show_line_numbers"] = self.line_num_box.isChecked()
+        CONFIG["editor"]["encoding"] = self.encoding_box.currentText()
+        CONFIG["app"]["theme_name"] = self.theme_box.currentText()
+        CONFIG["editor"]["cursor_blinking"] = self.cursor_blink_box.isChecked()
+        CONFIG["app"]["auto_save"] = self.autosave_box.isChecked()
+        CONFIG["editor"]["enable_syntax_highlighting"] = self.syntax_highlight_box.isChecked()
+        
+        if "behavior" not in CONFIG: CONFIG["behavior"] = {}
+        CONFIG["behavior"]["enable_command_undo"] = self.cmd_undo_box.isChecked()
+        
+        for i in range(self.key_table.rowCount()):
+            action_key = self.key_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
+            new_shortcut = self.key_table.item(i, 1).text()
+            CONFIG["keybinds"][action_key] = new_shortcut
+            
+        save_config() 
+        if self.parent_window: 
+            self.parent_window.editor.update_appearance()
+            self.parent_window.refresh_shortcuts()
+            self.parent_window.update_status_encoding()
+            self.parent_window.apply_editor_fixes() 
+            self.parent_window.editor.set_lexer_from_filename(self.parent_window.last_active_filename or "untitled.txt")
+            
+            for i in range(self.parent_window.file_list.count()):
+                item = self.parent_window.file_list.item(i)
+                widget = self.parent_window.file_list.itemWidget(item)
+                if isinstance(widget, ExplorerItemWidget):
+                    widget.update_label_style()
+
+        self.accept()
+        
+# --- REVISED COMMAND PALETTE ---
+class CommandPalette(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # FIX #2: Initialize animations ONCE in __init__
+        self._geo_anim = QPropertyAnimation(self, b"geometry")
+        self._alpha_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._group = QParallelAnimationGroup(self)
+        self._group.addAnimation(self._geo_anim)
+        self._group.addAnimation(self._alpha_anim)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0,0,0,0)
+        
+        self.body = QFrame()
+        self.body.setObjectName("PaletteBody")
+        self.body.setStyleSheet(f"""
+            #PaletteBody {{
+                background-color: {CONFIG['theme']['sidebar']}; 
+                border: 1px solid {CONFIG['theme']['function']}; 
+                border-radius: 12px;
+            }}
+            QLineEdit {{ 
+                background: transparent; 
+                color: {CONFIG['theme']['fg']}; 
+                border: none; 
+                font-size: 16px; 
+                padding: 5px;
+            }}
+            QLineEdit:hover, QLineEdit:focus {{
+                border: none;
+                background: transparent;
+            }}
+            QListWidget {{ background: transparent; color: {CONFIG['theme']['fg']}; border: none; outline: none; }}
+            QListWidget::item {{ 
+                padding: 8px 10px; 
+                border-radius: 6px; 
+                margin: 2px 8px; 
+                border: 1px solid transparent; 
+            }}
+            QListWidget::item:hover {{ 
+                background: rgba(255, 255, 255, 0.05); 
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }}
+            QListWidget::item:selected {{ 
+                background: rgba(255, 255, 255, 0.08); 
+                border: 1px solid {CONFIG['theme']['function']};
+                color: white;
+                font-weight: bold; 
+            }}
+        """)
+        
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0,0,0,0)
+        body_layout.setSpacing(0)
+        
+        self.search_area = QFrame()
+        self.search_area.setObjectName("SearchArea")
+        self.search_area.setStyleSheet(f"""
+            #SearchArea {{
+                background-color: transparent;
+                border: none;
+                border-bottom: 1px solid {CONFIG['theme']['selection']};
+            }}
+        """)
+        search_layout = QHBoxLayout(self.search_area)
+        search_layout.setContentsMargins(15, 12, 15, 12)
+        search_layout.setSpacing(10)
+        
+        lbl_icon = QLabel()
+        lbl_icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], size=18).pixmap(18, 18))
+        search_layout.addWidget(lbl_icon)
+
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Type a command...")
+        self.input.setStyleSheet("border: none; background: transparent;")
+        self.input.installEventFilter(self)
+        search_layout.addWidget(self.input)
+        
+        self.results = QListWidget()
+        self.results.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.results.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        apply_smooth_scroll(self.results)
+        
+        body_layout.addWidget(self.search_area)
+        body_layout.addWidget(self.results)
+        main_layout.addWidget(self.body)
+        
+        self.main_window = parent
+        
+        # --- FIXED COMMAND LIST ---
+        # We use lambdas to pass 'register_undo=True' ONLY for palette actions
+        self.all_commands = [
+            # Tracked Actions
+            ("New Tab", "Ctrl+T", lambda: self.main_window.create_new_explorer_item(register_undo=True)),
+            ("Close Tab", "Ctrl+W", lambda: self.main_window.close_current_tab(register_undo=True)),
+            ("Rename Tab", "Ctrl+R", lambda: self.main_window.rename_current_tab(register_undo=True)),
+            
+            # Untracked / Standard Actions
+            ("Open File", "Ctrl+O", self.main_window.open_file),
+            ("Save File", "Ctrl+S", self.main_window.save_file),
+            ("Save File As", "", self.main_window.save_as),
+            ("Toggle Sidebar", "Ctrl+B", self.main_window.toggle_sidebar),
+            ("Settings", "", self.main_window.open_settings),
+            
+            # Editor Operations
+            ("Find Text", "Ctrl+F", lambda: self.main_window.open_find_bar()),
+            ("Global Find", "Ctrl+Shift+F", lambda: self.main_window.open_global_search()),
+            ("Go to Line", "Ctrl+G", lambda: self.main_window.open_goto_bar()),
+            
+            ("Undo", "Ctrl+Z", self.main_window.global_undo),
+            ("Redo", "Ctrl+Y", self.main_window.global_redo),
+            ("Cut", "Ctrl+X", self.main_window.editor.cut),
+            ("Copy", "Ctrl+C", self.main_window.editor.copy),
+            ("Paste", "Ctrl+V", self.main_window.editor.paste),
+            ("Select All", "Ctrl+A", self.main_window.editor.selectAll),
+            ("Zoom In", "Ctrl++", self.main_window.editor.zoomIn),
+            ("Zoom Out", "Ctrl+-", self.main_window.editor.zoomOut),
+            ("Exit Zenith", "Alt+F4", QApplication.instance().quit),
+        ]
+        self.populate_list()
+        
+        self.input.textChanged.connect(self.filter_list)
+        self.input.returnPressed.connect(self.trigger_selected)
+        self.results.itemClicked.connect(self.execute_command)
+        
+        self.last_close_time = 0
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            if not self.isActiveWindow():
+                self.hide_animated()
+        super().changeEvent(event)
+
+    def calculate_geometry(self):
+        parent = self.parent()
+        if not parent: return QRect(0,0,600,350)
+        main_geo = parent.geometry()
+        target_w = int(main_geo.width() * 0.5)
+        if target_w < 400: target_w = 400
+        if target_w > 800: target_w = 800
+        if target_w > main_geo.width() - 40: target_w = main_geo.width() - 40
+        h = 380
+        x = main_geo.x() + (main_geo.width() - target_w) // 2
+        y = main_geo.y() + int(main_geo.height() * 0.15)
+        return QRect(x, y, target_w, h)
+
+    def update_overlay_position(self):
+        if self.isVisible():
+            new_rect = self.calculate_geometry()
+            if self._group.state() != QParallelAnimationGroup.State.Running:
+                self.setGeometry(new_rect)
+
+    def show_animated(self):
+        parent = self.parent()
+        if not parent: return
+        if time.time() - self.last_close_time > 2.0:
+            self.input.clear()
+            self.results.clearSelection()
+            self.results.setCurrentRow(-1) 
+            self.results.scrollToTop()
+        QApplication.instance().installEventFilter(self)
+        end_rect = self.calculate_geometry()
+        start_rect = QRect(end_rect)
+        start_rect.setHeight(int(end_rect.height() * 0.9))
+        start_rect.moveTop(end_rect.y() - 20)
+        self.setWindowOpacity(0.01) 
+        self.setGeometry(start_rect)
+        self.show()
+        self.activateWindow()
+        self.input.setFocus()
+        self._geo_anim.setDuration(150)
+        self._geo_anim.setStartValue(start_rect)
+        self._geo_anim.setEndValue(end_rect)
+        self._geo_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self._alpha_anim.setDuration(150)
+        self._alpha_anim.setStartValue(0.0)
+        self._alpha_anim.setEndValue(1.0)
+        self._alpha_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        try: self._group.finished.disconnect()
+        except: pass
+        self._group.start()
+
+    def hide_animated(self):
+        QApplication.instance().removeEventFilter(self)
+        self.last_close_time = time.time()
+        if self._group.state() == QParallelAnimationGroup.State.Running:
+            self._group.stop()
+        current_rect = self.geometry()
+        end_rect = QRect(current_rect)
+        end_rect.setHeight(int(current_rect.height() * 0.9))
+        self._geo_anim.setDuration(100)
+        self._geo_anim.setStartValue(current_rect)
+        self._geo_anim.setEndValue(end_rect)
+        self._geo_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+        self._alpha_anim.setDuration(100)
+        self._alpha_anim.setStartValue(self.windowOpacity())
+        self._alpha_anim.setEndValue(0.0)
+        self._alpha_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+        try: self._group.finished.disconnect()
+        except: pass
+        self._group.finished.connect(self._on_hide_finished)
+        self._group.start()
+
+    def _on_hide_finished(self):
+        super(CommandPalette, self).hide()
+        if self.main_window:
+            self.main_window._palette_block = True
+            QTimer.singleShot(200, lambda: setattr(self.main_window, '_palette_block', False))
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if self.isVisible() and not self.geometry().contains(event.globalPosition().toPoint()):
+                self.hide_animated()
+                return False 
+        if source == self.input and event.type() == QEvent.Type.KeyPress:
+            is_ctrl_k = (event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_K)
+            is_ctrl_space = (event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Space)
+            if is_ctrl_k or is_ctrl_space:
+                self.hide_animated()
+                return True
+            if event.key() == Qt.Key.Key_Down:
+                idx = self.results.currentRow()
+                if idx < self.results.count() - 1: self.results.setCurrentRow(idx + 1)
+                return True
+            elif event.key() == Qt.Key.Key_Up:
+                idx = self.results.currentRow()
+                if idx > 0: self.results.setCurrentRow(idx - 1)
+                return True
+            elif event.key() == Qt.Key.Key_Return:
+                self.trigger_selected()
+                return True
+        return super().eventFilter(source, event)
+
+    def populate_list(self):
+        self.results.clear()
+        for name, short, func in self.all_commands: self.add_item(name, short, func)
+        self.results.setCurrentRow(-1)
+
+    def add_item(self, name, short, func):
+        text = f"{name}    ({short})" if short else name
+        item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, func)
+        self.results.addItem(item)
+
+    def filter_list(self, text):
+        self.results.clear()
+        search = text.lower()
+        for name, short, func in self.all_commands:
+            if search in name.lower(): self.add_item(name, short, func)
+        if text.strip() and self.results.count() > 0: 
+            self.results.setCurrentRow(0)
+        else:
+            self.results.setCurrentRow(-1)
+
+    def trigger_selected(self):
+        item = self.results.currentItem()
+        if item: self.execute_command(item)
+
+    def execute_command(self, item):
+        func = item.data(Qt.ItemDataRole.UserRole)
+        if func: 
+            self.hide_animated()
+            func() # Executes the lambda we defined in all_commands
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape: self.hide_animated()
+        else: super().keyPressEvent(event)
+
+class SearchTriggerButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedWidth(280)
+        self.setFixedHeight(32) 
+        # UPDATED STYLESHEET: Using 'background' and ensuring blue border on hover
+        self.setStyleSheet(f"""
+            QPushButton {{ 
+                background: {CONFIG['theme']['bg']}; 
+                border: 1px solid {CONFIG['theme']['selection']}; 
+                border-radius: 6px; 
+                text-align: left; 
+            }} 
+            QPushButton:hover {{ 
+                /* Subtle background change (slightly brighter) */
+                background: rgba(255, 255, 255, 0.08); 
+                /* KEEP THE BLUE OUTLINE */
+                border: 1px solid {CONFIG['theme']['function']}; 
+            }}
+            QPushButton:pressed {{ 
+                background: {CONFIG['theme']['selection']}; 
+            }}
+        """)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(8)
+        
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], size=14).pixmap(14, 14))
+        self.lbl_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        self.lbl_text = QLabel("Search commands...")
+        self.lbl_text.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-size: 13px; border: none; background: transparent;")
+        self.lbl_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        # TEXT ONLY SHORTCUT (NO BADGE)
+        self.lbl_shortcut = QLabel("Ctrl+K")
+        self.lbl_shortcut.setStyleSheet(f"""
+            color: {CONFIG['theme']['comment']}; 
+            background: transparent;
+            border: none;
+            font-family: Consolas, Monospace; 
+            font-size: 12px;
+            opacity: 0.7;
+        """)
+        self.lbl_shortcut.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        layout.addWidget(self.lbl_icon)
+        layout.addWidget(self.lbl_text)
+        layout.addStretch()
+        layout.addWidget(self.lbl_shortcut)
+        layout.setAlignment(self.lbl_shortcut, Qt.AlignmentFlag.AlignVCenter)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        CONFIG["keybinds"]["command_palette"] = "Ctrl+K, Ctrl+Space"
+        
+        # --- UNIFIED ACTION STACK ---
+        # Stores tuples: ('cmd', undo_func, redo_func) OR ['editor', count]
+        self.action_stack = [] 
+        self.redo_stack = []
+        self._is_undoing = False 
+        
+        if QApplication.instance(): QApplication.instance().setStyle("Fusion")
+        self.setWindowTitle("Zenith IDE")
+        self.resize(1200, 800)
+        self.file_states = {}
+        self.saved_content = {} 
+        self.untitled_count = 0
+        self.current_file_path = None
+        self.last_active_filename = None
+        self.is_switching_internal = False
+        self._window_actions = []
+        self._extra_shortcuts = [] 
+        border_col = CONFIG['theme']['selection']
+        
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {CONFIG['theme']['bg']}; }}
+            QLabel {{ color: {CONFIG['theme']['fg']}; }}
+            QSplitter::handle {{ background-color: {CONFIG['theme']['sidebar']}; width: 2px; }}
+            QToolBar {{ background: {CONFIG['theme']['sidebar']}; border-bottom: 1px solid {border_col}; padding: 6px; spacing: 10px; }}
+            QToolButton {{ color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 6px; font-size: 14px; }}
+            QToolButton:hover {{ background: {CONFIG['theme']['selection']}; }}
+            QMenu {{
+                background-color: {CONFIG['theme']['sidebar']};
+                color: {CONFIG['theme']['fg']};
+                border: 1px solid {CONFIG['theme']['function']};
+                border-radius: 6px;
+                padding: 5px;
+            }}
+            QMenu::item {{
+                padding: 5px 20px 5px 10px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {CONFIG['theme']['selection']};
+                color: white;
+            }}
+            QMenu::item:disabled {{ 
+                color: {CONFIG['theme']['comment']};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {CONFIG['theme']['selection']};
+                margin: 5px 0px;
+            }}
+            QMenu#ThreeDotMenu {{
+                background-color: {CONFIG['theme']['sidebar']};
+                color: white;
+                border: 1px solid #444;
+                padding: 8px;
+                font-size: 13px;
+                border-radius: 6px;
+            }}
+            QMenu#ThreeDotMenu::item {{
+                padding: 8px 30px 8px 15px;
+                border-radius: 4px;
+            }}
+            QMenu#ThreeDotMenu::item:selected {{
+                background-color: {CONFIG['theme']['selection']};
+                color: white;
+            }}
+            {SCROLLBAR_CSS} 
+        """)
+        
+        self.toolbar = QToolBar()
+        self.toolbar.setIconSize(QSize(20, 20))
+        self.toolbar.setMovable(False)
+        self.addToolBar(self.toolbar)
+        
+        self.btn_sidebar = QToolButton()
+        self.btn_sidebar.setIcon(colorize_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft), Qt.GlobalColor.white))
+        self.btn_sidebar.clicked.connect(self.toggle_sidebar)
+        self.toolbar.addWidget(self.btn_sidebar)
+        
+        spacer_l = QWidget()
+        spacer_l.setSizePolicy(pd := QWidget().sizePolicy())
+        pd.setHorizontalPolicy(pd.Policy.Expanding)
+        spacer_l.setSizePolicy(pd)
+        self.toolbar.addWidget(spacer_l)
+        
+        self.search_trigger = SearchTriggerButton()
+        self.search_trigger.clicked.connect(self.toggle_palette)
+        self.toolbar.addWidget(self.search_trigger)
+
+        spacer_r = QWidget()
+        spacer_r.setSizePolicy(pd)
+        spacer_r.setSizePolicy(pd)
+        self.toolbar.addWidget(spacer_r)
+        
+        self.btn_menu = QToolButton()
+        self.btn_menu.setText("⋮")
+        self.btn_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_menu.setStyleSheet("QToolButton { font-size: 22px; font-weight: bold; padding-bottom: 8px; color: white; } QToolButton::menu-indicator { image: none; }")
+        self.main_menu = QMenu(self)
+        self.main_menu.setObjectName("ThreeDotMenu")
+        self.setup_menu()
+        self.btn_menu.setMenu(self.main_menu)
+        self.toolbar.addWidget(self.btn_menu)
+        
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        self.sidebar_container = QWidget()
+        self.sidebar_container.setMaximumWidth(250)
+        self.sidebar_container.setMinimumWidth(250)
+        self.sidebar_container.setStyleSheet(f"background-color: {CONFIG['theme']['sidebar']}; border-right: 1px solid {border_col};")
+        side_layout = QVBoxLayout(self.sidebar_container)
+        side_layout.setContentsMargins(0,0,0,0)
+        
+        explorer_header = QWidget()
+        header_layout = QHBoxLayout(explorer_header)
+        header_layout.setContentsMargins(15, 15, 15, 5)
+        lbl_explorer = QLabel("EXPLORER")
+        lbl_explorer.setStyleSheet("font-weight: bold; color: #7f849c; font-size: 12px; letter-spacing: 1px; border: none;")
+        btn_new = QToolButton()
+        btn_new.setText("+")
+        btn_new.setToolTip("New Tab (Ctrl+T)")
+        btn_new.setStyleSheet(f"QToolButton {{ color: white; font-weight: bold; font-size: 18px; border: none; background: transparent; border-radius: 4px; padding: 2px; }} QToolButton:hover {{ background: {CONFIG['theme']['selection']}; }} QToolButton:pressed {{ background: {CONFIG['theme']['function']}; color: #1e1e2e; }}")
+        btn_new.clicked.connect(self.create_new_explorer_item)
+        header_layout.addWidget(lbl_explorer)
+        header_layout.addStretch()
+        header_layout.addWidget(btn_new)
+        side_layout.addWidget(explorer_header)
+
+        self.file_list = SidebarListWidget() 
+        self.file_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.file_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.file_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        apply_smooth_scroll(self.file_list)
+        self.file_list.setStyleSheet(f"""
+            QListWidget {{ background: transparent; color: {CONFIG['theme']['fg']}; border: none; padding: 10px 0px; outline: none; }} 
+            QListWidget::item {{ padding: 2px; border-radius: 6px; margin: 2px 10px; border: none; }} 
+            QListWidget::item:hover {{ background: {CONFIG['theme']['selection']}; }} 
+            QListWidget::item:selected {{ background: {CONFIG['theme']['function']}; }}
+            {EXPLORER_SCROLLBAR_CSS}
+        """)
+        self.file_list.currentItemChanged.connect(self.switch_file_buffer)
+        side_layout.addWidget(self.file_list)
+        
+        editor_area = QFrame()
+        editor_layout = QVBoxLayout(editor_area)
+        editor_layout.setContentsMargins(0,0,0,0)
+        editor_layout.setSpacing(0)
+        
+        self.top_bar = QWidget()
+        self.top_bar.setObjectName("TopBar")
+        self.top_bar.setStyleSheet(f"#TopBar {{ background: {CONFIG['theme']['bg']}; border-bottom: 2px solid {CONFIG['theme']['function']}; }}")
+        top_bar_layout = QHBoxLayout(self.top_bar)
+        top_bar_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.breadcrumbs = QLabel("  [Untitled.txt]  ")
+        self.breadcrumbs.setStyleSheet(f"color: {CONFIG['theme']['comment']}; padding: 10px; font-family: Consolas; font-size: 12px; border: none;")
+        
+        # --- GO TO TOP BUTTON ---
+        self.btn_go_top = QToolButton()
+        self.btn_go_top.setIcon(create_icon("arrow_up", CONFIG['theme']['comment'], size=16))
+        self.btn_go_top.setFixedSize(24, 24)
+        self.btn_go_top.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_go_top.setToolTip("Go to Top")
+        self.btn_go_top.setStyleSheet(f"QToolButton {{ border: none; background: transparent; border-radius: 4px; }} QToolButton:hover {{ background-color: {CONFIG['theme']['selection']}; }}")
+        self.btn_go_top.clicked.connect(lambda: (self.editor.setCursorPosition(0, 0), self.editor.setFocus()))
+
+        self.btn_close_tab_main = QToolButton()
+        self.btn_close_tab_main.setObjectName("CloseBtn")
+        self.btn_close_tab_main.setIcon(create_icon("x", CONFIG['theme']['comment'], size=16))
+        self.btn_close_tab_main.setFixedSize(24, 24)
+        self.btn_close_tab_main.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close_tab_main.setToolTip("Close Tab (Ctrl+W)")
+        self.btn_close_tab_main.setStyleSheet(f"#CloseBtn {{ border: none; background: transparent; border-radius: 4px; }} #CloseBtn:hover {{ background-color: #ff5555; }}")
+        self.btn_close_tab_main.clicked.connect(self.close_current_tab)
+        
+        top_bar_layout.addWidget(self.breadcrumbs)
+        top_bar_layout.addStretch()
+        top_bar_layout.addWidget(self.btn_go_top)
+        top_bar_layout.addWidget(self.btn_close_tab_main)
+        spacer_margin = QWidget()
+        spacer_margin.setFixedWidth(5)
+        top_bar_layout.addWidget(spacer_margin)
+        editor_layout.addWidget(self.top_bar)
+        
+        self.editor = ZenithEditor()
+        self.editor.setStyleSheet("border: none;")
+        # FIX: Enable drag and drop on editor
+        self.editor.setAcceptDrops(True)
+        apply_smooth_scroll(self.editor)
+        self.editor.cursorPositionChanged.connect(self.update_cursor_stats)
+        BUS.editor_text_changed.connect(self.on_editor_text_changed)
+
+        self.image_preview = QLabel(self.editor)
+        self.image_preview.setWindowFlags(Qt.WindowType.ToolTip) # Floating, no border
+        self.image_preview.setStyleSheet("border: 2px solid #89b4fa; background: #1e1e2e; border-radius: 4px;")
+        self.image_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_preview.hide()
+        # Check for image whenever cursor moves
+        self.editor.cursorPositionChanged.connect(self.check_line_for_image)
+        # ----------------------------------------
+        self.editor.installEventFilter(self)
+        if hasattr(self.editor, 'viewport'):
+            self.editor.viewport().installEventFilter(self)
+
+        self.editor.installEventFilter(self)
+        
+        # KEY EVENT FILTER (Catches Ctrl+Z/Y before Scintilla)
+        self.editor.installEventFilter(self)
+        
+        editor_layout.addWidget(self.editor)
+        
+        # --- NEW FLOATING BARS ---
+        self.find_bar = FindBar(self.editor)
+        self.goto_bar = GoToBar(self.editor)
+        self.global_search_bar = GlobalSearchBar(self.editor, self)
+        
+        status_container = QWidget()
+        status_container.setStyleSheet(f"background: {CONFIG['theme']['sidebar']}; border-top: 1px solid {border_col};")
+        status_layout = QHBoxLayout(status_container)
+        status_layout.setContentsMargins(10, 5, 10, 5)
+        self.status_bar = QLabel(" Ln 1, Col 1")
+        self.status_bar.setStyleSheet("color: #89b4fa; font-size: 12px; border: none;")
+        self.encoding_label = QLabel(CONFIG["editor"].get("encoding", "utf-8").upper())
+        self.encoding_label.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-size: 12px; border: none;")
+        status_layout.addWidget(self.status_bar)
+        status_layout.addStretch()
+        status_layout.addWidget(self.encoding_label)
+        editor_layout.addWidget(status_container)
+        
+        layout.addWidget(self.sidebar_container)
+        layout.addWidget(editor_area)
+        
+        self.anim_side = QPropertyAnimation(self.sidebar_container, b"maximumWidth")
+        self.anim_side.setDuration(250)
+        self.anim_side.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self.palette = CommandPalette(self)
+        BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
+        
+        self.refresh_shortcuts()
+        QTimer.singleShot(0, self.delayed_startup)
+
+    def resizeEvent(self, event):
+        # Update floating bars position
+        if self.palette.isVisible(): self.palette.update_overlay_position()
+        self.find_bar.update_position()
+        self.goto_bar.update_position()
+        self.global_search_bar.update_position()
+        super().resizeEvent(event)
+    def check_line_for_image(self, line, index):
+        """Auto-detects image paths on the current line and shows a popup preview."""
+        text = self.editor.text(line).strip()
+        if not text:
+            self.image_preview.hide()
+            return
+
+        # 1. Clean up path (remove Markdown/Obsidian syntax)
+        clean_path = text.replace("![[", "").replace("]]", "").replace("![](", "").replace(")", "")
+        
+        # 2. Check Extension
+        img_exts = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp']
+        if not any(clean_path.lower().endswith(ext) for ext in img_exts):
+            self.image_preview.hide()
+            return
+
+        # 3. Resolve Path
+        potential_paths = []
+        potential_paths.append(clean_path) # Absolute
+        
+        # Relative to Current File
+        if self.current_file_path:
+            base_dir = os.path.dirname(os.path.abspath(self.current_file_path))
+            potential_paths.append(os.path.join(base_dir, clean_path))
+        
+        # Relative to CWD
+        potential_paths.append(os.path.join(os.getcwd(), clean_path))
+        
+        # Relative to Home/images (Common for untitled pastes)
+        potential_paths.append(os.path.join(os.path.expanduser("~"), clean_path))
+
+        final_path = None
+        for p in potential_paths:
+            if os.path.exists(p) and os.path.isfile(p):
+                final_path = p
+                break
+
+        if final_path:
+            # 4. Show Preview
+            pixmap = QPixmap(final_path)
+            if not pixmap.isNull():
+                # Scale nicely (max 400px)
+                scaled = pixmap.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.image_preview.setPixmap(scaled)
+                self.image_preview.adjustSize()
+                
+                # 5. Position Popup below the line
+                # SCI_POINTYFROMPOSITION = 2247, SCI_GETCURRENTPOS = 2008
+                curr_pos = self.editor.SendScintilla(2008)
+                y_pos = self.editor.SendScintilla(2247, 0, curr_pos)
+                
+                # Calculate global position
+                # Offset X slightly (50px) and Y down by ~line height (25px)
+                global_pos = self.editor.mapToGlobal(QPoint(50, y_pos + 25))
+                
+                self.image_preview.move(global_pos)
+                self.image_preview.show()
+                return
+
+        self.image_preview.hide()
+
+        
+    def eventFilter(self, source, event):
+        # Check if the source is the editor OR the editor's viewport
+        is_editor = (source == self.editor or 
+                     (hasattr(self.editor, 'viewport') and source == self.editor.viewport()))
+
+        # --- IMAGE DRAG & DROP SUPPORT ---
+        if is_editor:
+            # 1. Handle Drag Enter (When you first drag into the window)
+            if event.type() == QEvent.Type.DragEnter:
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    return True # Stop further processing
+            
+            # 2. Handle Drag Move (CRITICAL: Required for the cursor to stay active)
+            elif event.type() == QEvent.Type.DragMove:
+                if event.mimeData().hasUrls():
+                    event.acceptProposedAction()
+                    return True
+            
+            # 3. Handle the actual Drop
+            elif event.type() == QEvent.Type.Drop:
+                md = event.mimeData()
+                if md.hasUrls():
+                    img_exts = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
+                    
+                    # Determine base directory
+                    if self.current_file_path:
+                        base_dir = os.path.dirname(os.path.abspath(self.current_file_path))
+                    else:
+                        base_dir = os.getcwd() 
+
+                    # Create 'images' folder
+                    images_dir = os.path.join(base_dir, "images")
+                    if not os.path.exists(images_dir):
+                        try:
+                            os.makedirs(images_dir)
+                        except OSError:
+                            images_dir = base_dir 
+
+                    files_processed = []
+
+                    for url in md.urls():
+                        fpath = url.toLocalFile()
+                        if not fpath: continue # Skip if path is invalid
+                        
+                        _, ext = os.path.splitext(fpath)
+                        if ext.lower() in img_exts:
+                            filename = os.path.basename(fpath)
+                            target_path = os.path.join(images_dir, filename)
+                            
+                            # Copy the file
+                            if os.path.abspath(fpath) != os.path.abspath(target_path):
+                                try:
+                                    shutil.copy2(fpath, target_path)
+                                except Exception as e:
+                                    print(f"Error copying image: {e}")
+                                    target_path = fpath 
+
+                            # Create relative path for Markdown
+                            try:
+                                rel_path = os.path.relpath(target_path, base_dir).replace(os.sep, '/')
+                            except ValueError:
+                                rel_path = target_path 
+
+                            # Insert Text
+                            self.editor.insert(f"![{filename}]({rel_path})\n")
+                            files_processed.append(target_path)
+                    
+                    if files_processed:
+                        event.acceptProposedAction()
+                        # Trigger preview
+                        QTimer.singleShot(100, lambda: self.check_line_for_image(self.editor.getCursorPosition()[0], 0))
+                        return True
+
+        # --- KEYBOARD SHORTCUTS ---
+        # Note: We use 'is_editor' here too so shortcuts work if focus is on the viewport
+        if is_editor and event.type() == QEvent.Type.KeyPress:
+            
+            # Paste Image (Ctrl+V)
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_V:
+                md = QApplication.clipboard().mimeData()
+                if md.hasImage() and not md.hasUrls():
+                    if self.current_file_path:
+                        base_dir = os.path.dirname(self.current_file_path)
+                    else:
+                        base_dir = os.getcwd()
+                    
+                    img_dir = os.path.join(base_dir, "images")
+                    if not os.path.exists(img_dir): 
+                        os.makedirs(img_dir, exist_ok=True)
+                    
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    fname = f"pasted_{timestamp}.png"
+                    full_path = os.path.join(img_dir, fname)
+                    
+                    qimg = QApplication.clipboard().image()
+                    if qimg.save(full_path, "PNG"):
+                        rel_path = os.path.relpath(full_path, base_dir).replace(os.sep, '/')
+                        self.editor.insert(f"![image]({rel_path})")
+                        QTimer.singleShot(50, lambda: self.check_line_for_image(self.editor.getCursorPosition()[0], 0))
+                        return True
+
+            # Undo/Redo
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                if event.key() == Qt.Key.Key_Z:
+                    if CONFIG.get("behavior", {}).get("enable_command_undo", False):
+                        self.global_undo(); return True
+                elif event.key() == Qt.Key.Key_Y:
+                    if CONFIG.get("behavior", {}).get("enable_command_undo", False):
+                        self.global_redo(); return True
+                        
+        return super().eventFilter(source, event)
+
+    def check_line_for_image(self, line, index):
+        """Auto-detects image paths on the current line and shows a popup preview."""
+        # Get text of the current line
+        text = self.editor.text(line).strip()
+        if not text:
+            self.image_preview.hide()
+            return
+
+        # 1. Extract path using Regex to handle various Markdown link formats
+        # Looks for: ![any alt text](captured_path)
+        match = re.search(r'!\[.*?\]\((.*?)\)', text)
+        if match:
+            clean_path = match.group(1)
+        else:
+            # Fallback for Obsidian-style links: ![[captured_path]]
+            match_obs = re.search(r'!\[\[(.*?)\]\]', text)
+            if match_obs:
+                 clean_path = match_obs.group(1)
+            else:
+                # No image link pattern found
+                self.image_preview.hide()
+                return
+
+        # 2. Check File Extension
+        img_exts = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp']
+        if not any(clean_path.lower().endswith(ext) for ext in img_exts):
+            self.image_preview.hide()
+            return
+
+        # 3. Resolve absolute path
+        potential_paths = []
+        # a) Is it already absolute?
+        potential_paths.append(clean_path) 
+        
+        # b) Relative to the currently open file's directory
+        if self.current_file_path:
+            base_dir = os.path.dirname(os.path.abspath(self.current_file_path))
+            potential_paths.append(os.path.join(base_dir, clean_path))
+        
+        # c) Relative to the Current Working Directory (CWD)
+        potential_paths.append(os.path.join(os.getcwd(), clean_path))
+        
+        # d) Relative to user's home directory (common for unsaved pastes)
+        potential_paths.append(os.path.join(os.path.expanduser("~"), clean_path))
+
+        final_path = None
+        for p in potential_paths:
+            if os.path.exists(p) and os.path.isfile(p):
+                final_path = p
+                break
+
+        if final_path:
+            # 4. Load and display the image
+            pixmap = QPixmap(final_path)
+            if not pixmap.isNull():
+                # Scale the image to a reasonable size for preview
+                scaled = pixmap.scaled(400, 400, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.image_preview.setPixmap(scaled)
+                self.image_preview.adjustSize()
+                
+                # 5. Position Popup below the current line
+                # SCI_GETCURRENTPOS = 2008, SCI_POINTYFROMPOSITION = 2247
+                curr_pos = self.editor.SendScintilla(2008)
+                y_pos = self.editor.SendScintilla(2247, 0, curr_pos)
+                
+                # Calculate global coordinates for the popup
+                # Offset X by 50px, Y by roughly one line height (25px)
+                global_pos = self.editor.mapToGlobal(QPoint(50, y_pos + 25))
+                
+                self.image_preview.move(global_pos)
+                self.image_preview.show()
+                return
+
+        # If no valid image file was found
+        self.image_preview.hide()
+
+    # --- UNIFIED PRIORITY UNDO SYSTEM ---
+    def register_command_action(self, undo_func, redo_func):
+        """Pushes a Command action onto the unified stack."""
+        self.action_stack.append(('cmd', undo_func, redo_func))
+        self.redo_stack.clear()
+
+    def record_editor_action(self):
+        """Marks the top of the stack as an editor session."""
+        if self._is_undoing: return
+        # If top is already 'editor', do nothing (grouping implicitly)
+        if not self.action_stack or self.action_stack[-1][0] != 'editor':
+            self.action_stack.append(['editor', 1])
+            self.redo_stack.clear()
+
+    def global_undo(self):
+        """Decides whether to undo Editor text or App Command based on stack order."""
+        if not self.action_stack:
+            return
+
+        self._is_undoing = True
+        top_item = self.action_stack[-1]
+        action_type = top_item[0]
+
+        if action_type == 'editor':
+            # Undo in Scintilla
+            self.editor.undo()
+            
+            # FIX: Use isUndoAvailable() instead of canUndo()
+            if not self.editor.isUndoAvailable():
+                self.action_stack.pop()
+                
+        elif action_type == 'cmd':
+            undo_func = top_item[1]
+            redo_func = top_item[2]
+            undo_func()
+            self.redo_stack.append(self.action_stack.pop())
+
+        self._is_undoing = False
+
+    def global_redo(self):
+        # Redo logic for commands 
+        if self.redo_stack:
+            item = self.redo_stack.pop()
+            if item[0] == 'cmd':
+                redo_func = item[2]
+                redo_func()
+                self.action_stack.append(item)
+        else:
+            self.editor.redo()
+
+    def restore_tab(self, name, content):
+        item = self.create_new_explorer_item(name=name, register_undo=False)
+        self.file_states[name] = content
+        self.saved_content[name] = content 
+        self.editor.setText(content)
+        self.apply_editor_fixes()
+
+    def close_tab_by_name(self, name):
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if self.get_widget_text(item) == name:
+                self._do_close_tab(item, register_undo=False)
+                break
+
+    # --- ACTION PRIMITIVES ---
+    
+    def create_new_explorer_item(self, name=None, register_undo=False):
+        if self.last_active_filename and self.last_active_filename in self.file_states:
+             self.file_states[self.last_active_filename] = self.editor.text()
+        
+        if name:
+            new_name = name
+        else:
+            # FIX #9: Logic for filling gap in Untitled numbers
+            existing_untitled = []
+            for k in self.file_states.keys():
+                match = re.match(r"Untitled (\d+)\.txt", k)
+                if match:
+                    existing_untitled.append(int(match.group(1)))
+            
+            check_num = 1
+            while True:
+                if check_num not in existing_untitled:
+                    break
+                check_num += 1
+            
+            new_name = f"Untitled {check_num}.txt"
+            
+        self.file_states[new_name] = ""
+        self.saved_content[new_name] = "" 
+        item = self.add_sidebar_item(new_name, is_new=True)
+        self.file_list.takeItem(self.file_list.row(item))
+        self.file_list.insertItem(0, item)
+        self.file_list.setItemWidget(item, ExplorerItemWidget(new_name, item, self, is_new=True))
+        self.file_list.setCurrentItem(item)
+        self.editor.setFocus()
+        self.editor.set_lexer_from_filename(new_name)
+        
+        # FIX #1: Use setModified(False) instead of setSavePoint
+        self.editor.setModified(False) 
+        
+        self.apply_editor_fixes()
+        
+        if register_undo and CONFIG.get("behavior", {}).get("enable_command_undo", False):
+            self.register_command_action(
+                lambda: self.close_tab_by_name(new_name),
+                lambda: self.create_new_explorer_item(name=new_name, register_undo=False)
+            )
+        return item 
+
+    def close_current_tab(self, register_undo=False):
+        item = self.file_list.currentItem()
+        if item: 
+            self._do_close_tab(item, register_undo=register_undo)
+
+    def close_explorer_tab(self, item):
+        self._do_close_tab(item, register_undo=False)
+
+    def _do_close_tab(self, item, register_undo=False):
+        name = self.get_widget_text(item)
+        content = self.file_states.get(name, self.editor.text() if name == self.last_active_filename else "")
+        
+        if name in self.file_states: del self.file_states[name]
+        if name in self.saved_content: del self.saved_content[name]
+        self.file_list.takeItem(self.file_list.row(item))
+        
+        if register_undo and CONFIG.get("behavior", {}).get("enable_command_undo", False):
+            self.register_command_action(
+                lambda: self.restore_tab(name, content),
+                lambda: self.close_tab_by_name(name)
+            )
+            
+        if self.file_list.count() == 0: QApplication.quit()
+
+    def rename_current_tab(self, register_undo=False):
+        item = self.file_list.currentItem()
+        if not item: return
+        old_name = self.get_widget_text(item)
+        new_name, ok = QInputDialog.getText(self, "Rename Tab", "Enter new name:", text=old_name)
+        if ok and new_name and new_name != old_name:
+            # FIX #4: Check internal states AND filesystem
+            if new_name in self.file_states or os.path.exists(new_name):
+                QMessageBox.warning(self, "Error", f"The file '{new_name}' already exists.")
+                return
+            self.perform_tab_rename(old_name, new_name, register_undo=register_undo)
+
+    def perform_tab_rename(self, old_name, new_name, register_undo=False):
+        if old_name in self.file_states:
+            self.file_states[new_name] = self.file_states.pop(old_name)
+        if old_name in self.saved_content:
+            self.saved_content[new_name] = self.saved_content.pop(old_name)
+            
+        item_found = None
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            if self.get_widget_text(it) == old_name:
+                item_found = it
+                break
+        
+        if item_found:
+            widget = self.file_list.itemWidget(item_found)
+            if isinstance(widget, ExplorerItemWidget): widget.set_text(new_name)
+            
+            if self.last_active_filename == old_name:
+                self.last_active_filename = new_name
+                self.breadcrumbs.setText(f"  {new_name}  ")
+                self.editor.set_lexer_from_filename(new_name)
+                self.apply_editor_fixes()
+
+        if register_undo and CONFIG.get("behavior", {}).get("enable_command_undo", False):
+            self.register_command_action(
+                lambda: self.perform_tab_rename(new_name, old_name, register_undo=False),
+                lambda: self.perform_tab_rename(old_name, new_name, register_undo=False)
+            )
+
+    # --- REST OF CLASS ---
+    def moveEvent(self, event):
+        if self.palette.isVisible(): self.palette.update_overlay_position()
+        super().moveEvent(event)
+
+    def apply_editor_fixes(self):
+        self.editor.SendScintilla(2516, 1) 
+        sidebar_bg = QColor(CONFIG['theme']['sidebar'])
+        text_fg = QColor(CONFIG['theme']['comment'])
+        if hasattr(self.editor, "setMarginsBackgroundColor"):
+            self.editor.setMarginsBackgroundColor(sidebar_bg)
+        if hasattr(self.editor, "setMarginsForegroundColor"):
+            self.editor.setMarginsForegroundColor(text_fg)
+
+    def delayed_startup(self):
+        if self.file_list.count() == 0:
+            self.create_new_explorer_item(register_undo=False) 
+        else:
+            self.file_list.setCurrentRow(0)
+        self.apply_editor_fixes()
+
+    def refresh_shortcuts(self):
+        self.setup_menu() 
+        for sc in self._extra_shortcuts: sc.setEnabled(False)
+        self._extra_shortcuts.clear()
+        
+        def create_shortcut(seq_str, callback):
+            if not seq_str: return
+            for part in seq_str.split(','):
+                part = part.strip()
+                if part:
+                    sc = QShortcut(QKeySequence(part), self)
+                    sc.setContext(Qt.ShortcutContext.WindowShortcut)
+                    sc.activated.connect(callback)
+                    self._extra_shortcuts.append(sc)
+
+        create_shortcut(CONFIG["keybinds"].get("new_tab", "Ctrl+T"), self.create_new_explorer_item)
+        create_shortcut(CONFIG["keybinds"].get("command_palette", "Ctrl+K, Ctrl+Space"), self.toggle_palette)
+        create_shortcut("Ctrl+Z", self.global_undo)
+        create_shortcut("Ctrl+Y", self.global_redo)
+        
+        # --- FIXED: REMOVE DUPLICATE SHORTCUT REGISTRATION ---
+        # The shortcuts are already handled by QAction in setup_menu()
+        # Adding them here again causes "Ambiguous shortcut overload"
+        
+    def _handle_shortcut_feedback(self): pass
+
+    def update_status_encoding(self): 
+        self.encoding_label.setText(CONFIG["editor"].get("encoding", "utf-8").upper())
+
+    def get_widget_text(self, item): 
+        widget = self.file_list.itemWidget(item)
+        return widget.text() if isinstance(widget, ExplorerItemWidget) else item.text()
+
+    def switch_file_buffer(self, current, previous):
+        if self.is_switching_internal: return
+        if previous:
+            prev_widget = self.file_list.itemWidget(previous)
+            if isinstance(prev_widget, ExplorerItemWidget): prev_widget.set_selected_visuals(False)
+            self.file_states[self.get_widget_text(previous)] = self.editor.text()
+        elif self.last_active_filename: self.file_states[self.last_active_filename] = self.editor.text()
+        
+        if current:
+            self.editor.setDisabled(False)
+            self.editor.setVisible(True)
+            self.top_bar.setVisible(True)
+            curr_widget = self.file_list.itemWidget(current)
+            if isinstance(curr_widget, ExplorerItemWidget): curr_widget.set_selected_visuals(True)
+            curr_name = self.get_widget_text(current)
+            self.last_active_filename = curr_name
+            self.breadcrumbs.setText(f"  {curr_name}  ")
+            
+            # FIX #3 & #6: Use Try/Except AND Threading for loading
+            if curr_name not in self.file_states:
+                if os.path.exists(curr_name):
+                    self.editor.setDisabled(True) # Disable while loading
+                    enc = CONFIG["editor"].get("encoding", "utf-8")
+                    self.loader = FileLoadWorker(curr_name, enc)
+                    self.loader.finished_loading.connect(self.on_file_loaded)
+                    self.loader.start()
+                    return # Exit here, let thread finish
+                else:
+                    # File doesn't exist (deleted?), init empty
+                    self.file_states[curr_name] = ""
+                    self.current_file_path = None
+            
+            self._finalize_switch(curr_name)
+        else: 
+            self.editor.setDisabled(True)
+            self.editor.setVisible(False)
+            self.top_bar.setVisible(False)
+
+    def on_file_loaded(self, name, content, success):
+        self.editor.setDisabled(False)
+        if success:
+            self.file_states[name] = content
+            self.saved_content[name] = content
+            self.current_file_path = name
+        else:
+            # FIX #3: Handle load failure gracefully
+            QMessageBox.critical(self, "Error", f"Could not read file: {content}")
+            self.file_states[name] = ""
+            
+        if name == self.last_active_filename:
+            self._finalize_switch(name)
+
+    def _finalize_switch(self, curr_name):
+        content = self.file_states.get(curr_name, "")
+        self.is_switching_internal = True
+        self.editor.setText(content)
+        self.editor.set_lexer_from_filename(curr_name)
+        self.editor.setModified(False)
+        self.is_switching_internal = False
+        self.apply_editor_fixes()
+        
+        # --- FIXED: UPDATE GOTO BAR LIMITS ON TAB SWITCH ---
+        if hasattr(self, 'goto_bar') and self.goto_bar.isVisible():
+            self.goto_bar.update_limits_if_needed()
+
+    def on_editor_text_changed(self, text):
+        if self.is_switching_internal: return
+        
+        # KEY FIX: Record editor activity in the unified stack
+        if CONFIG.get("behavior", {}).get("enable_command_undo", False):
+            self.record_editor_action()
+
+        item = self.file_list.currentItem()
+        if item:
+            widget = self.file_list.itemWidget(item)
+            # FIX #5: Use QScintilla isModified() instead of string comparison
+            is_dirty = self.editor.isModified()
+            if isinstance(widget, ExplorerItemWidget):
+                if widget.is_dirty != is_dirty:
+                    widget.set_dirty(is_dirty)
+
+    def add_sidebar_item(self, name, is_new=False):
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 34))
+        self.file_list.addItem(item)
+        self.file_list.setItemWidget(item, ExplorerItemWidget(name, item, self, is_new))
+        return item
+
+    def update_cursor_stats(self, line, index): 
+        self.status_bar.setText(f" Ln {line + 1}, Col {index + 1}")
+
+    def open_find_bar(self):
+        if self.find_bar.isVisible():
+            self.find_bar.hide_animated()
+        else:
+            if hasattr(self, 'goto_bar'): self.goto_bar.hide_animated()
+            if hasattr(self, 'global_search_bar'): self.global_search_bar.hide_animated()
+            self.find_bar.show_animated()
+
+    def open_goto_bar(self):
+        if self.goto_bar.isVisible():
+            self.goto_bar.hide_animated()
+        else:
+            if hasattr(self, 'find_bar'): self.find_bar.hide_animated()
+            if hasattr(self, 'global_search_bar'): self.global_search_bar.hide_animated()
+            self.goto_bar.show_animated()
+
+    def open_global_search(self):
+        if self.global_search_bar.isVisible():
+            self.global_search_bar.hide_animated()
+        else:
+            if hasattr(self, 'find_bar'): self.find_bar.hide_animated()
+            if hasattr(self, 'goto_bar'): self.goto_bar.hide_animated()
+            self.global_search_bar.show_animated()
+
+    def open_file_at_line(self, filename, line_index):
+        # Find tab with this filename or open it
+        target_item = None
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            if self.get_widget_text(item) == filename:
+                target_item = item
+                break
+        
+        if not target_item:
+            # Should not happen since we search open files, but safety check
+            return
+
+        self.file_list.setCurrentItem(target_item)
+        self.editor.setCursorPosition(line_index, 0)
+        self.editor.setFocus()
+
+    def copy_file_path(self):
+        if self.current_file_path:
+            QApplication.clipboard().setText(os.path.abspath(self.current_file_path))
+            self.status_bar.setText(f" Copied path: {self.current_file_path}")
+        else:
+            self.status_bar.setText(" File not saved, cannot copy path.")
+
+    def setup_menu(self):
+        m = self.main_menu
+        m.clear()
+        for act in self._window_actions: self.removeAction(act)
+        self._window_actions.clear()
+        
+        def add_action_to_window(text, slot, shortcut_key):
+            act = QAction(text, self)
+            seq = CONFIG["keybinds"].get(shortcut_key)
+            if seq:
+                keys = [QKeySequence(k.strip()) for k in seq.split(',') if k.strip()]
+                if shortcut_key in ["command_palette", "new_tab"]: pass
+                else: act.setShortcuts(keys)
+            act.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+            act.triggered.connect(slot)
+            self.addAction(act)
+            self._window_actions.append(act)
+            return act
+        
+        m.addAction(add_action_to_window("Open...", self.open_file, "open"))
+        m.addAction(add_action_to_window("Save", self.save_file, "save"))
+        m.addAction(add_action_to_window("Save As...", self.save_as, ""))
+        add_action_to_window("Close Tab", self.close_current_tab, "close_tab")
+        add_action_to_window("Toggle Sidebar", self.toggle_sidebar, "sidebar_toggle")
+        add_action_to_window("Palette", self.toggle_palette, "command_palette")
+        m.addSeparator()
+        
+        # --- NEW MENU ITEMS FOR FIND/GOTO (Removed from visual menu, kept as actions) ---
+        if hasattr(self, 'find_bar') and hasattr(self, 'goto_bar'):
+            act_find = QAction("Find Text", self)
+            act_find.setShortcut("Ctrl+F")
+            # Connect to new helper methods that handle mutual exclusion
+            act_find.triggered.connect(self.open_find_bar)
+            self.addAction(act_find)  
+            self._window_actions.append(act_find)
+            # m.addAction(act_find) <--- REMOVED FROM MENU
+
+            act_goto = QAction("Go to Line", self)
+            act_goto.setShortcut("Ctrl+G")
+            # Connect to new helper methods that handle mutual exclusion
+            act_goto.triggered.connect(self.open_goto_bar)
+            self.addAction(act_goto)
+            self._window_actions.append(act_goto)
+            # m.addAction(act_goto) <--- REMOVED FROM MENU
+
+        # --- GLOBAL SEARCH (New) ---
+        act_global = QAction("Global Find", self)
+        act_global.setShortcut("Ctrl+Shift+F")
+        act_global.triggered.connect(self.open_global_search)
+        self.addAction(act_global)
+        self._window_actions.append(act_global)
+        # m.addAction(act_global) # Optional: Add to menu if you want
+
+        # --- COPY PATH HOTKEY ---
+        act_copy_path = QAction("Copy File Path", self)
+        act_copy_path.setShortcut("Ctrl+Shift+C")
+        act_copy_path.triggered.connect(self.copy_file_path)
+        self.addAction(act_copy_path)
+        self._window_actions.append(act_copy_path)
+        
+        m.addSeparator()
+        act_set = QAction("Settings", self)
+        act_set.triggered.connect(self.open_settings)
+        m.addAction(act_set)
+
+    def toggle_sidebar(self):
+        width = self.sidebar_container.width()
+        base_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight if width > 0 else QStyle.StandardPixmap.SP_ArrowLeft)
+        self.btn_sidebar.setIcon(colorize_icon(base_icon, Qt.GlobalColor.white))
+        if width > 0: 
+            self.sidebar_container.setMinimumWidth(0)
+            self.anim_side.setStartValue(width)
+            self.anim_side.setEndValue(0)
+        else: 
+            self.anim_side.setStartValue(0)
+            self.anim_side.setEndValue(250)
+            self.sidebar_container.setMinimumWidth(0) 
+        self.anim_side.start()
+
+    def refresh_explorer(self): pass
+
+    def open_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open", "", "All Files (*)")
+        if path: 
+            if self.last_active_filename: self.file_states[self.last_active_filename] = self.editor.text()
+            fname = os.path.basename(path)
+            found = False
+            for i in range(self.file_list.count()):
+                item = self.file_list.item(i)
+                if self.get_widget_text(item) == fname: 
+                    self.file_list.setCurrentItem(item)
+                    found = True
+                    break
+            if not found: 
+                item = self.add_sidebar_item(fname)
+                self.file_list.setCurrentItem(item)
+
+    def save_file(self):
+        item = self.file_list.currentItem()
+        if not item: return
+        name = self.get_widget_text(item)
+        content = self.editor.text()
+        self.file_states[name] = content
+        self.saved_content[name] = content
+        
+        widget = self.file_list.itemWidget(item)
+        if isinstance(widget, ExplorerItemWidget): widget.set_dirty(False)
+        self.editor.setModified(False)
+
+        if os.path.exists(name):
+             enc = CONFIG["editor"].get("encoding", "utf-8")
+             try:
+                 with open(name, 'w', encoding=enc) as f: 
+                     f.write(content)
+             except Exception as e:
+                 QMessageBox.critical(self, "Save Error", str(e))
+        else: self.save_as()
+
+    def save_as(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Text Files (*.txt);;All Files (*)")
+        if path:
+            if not os.path.splitext(path)[1]:
+                path += ".txt"
+            enc = CONFIG["editor"].get("encoding", "utf-8")
+            with open(path, 'w', encoding=enc) as f: 
+                f.write(self.editor.text())
+            item = self.file_list.currentItem()
+            if item:
+                old_name = self.get_widget_text(item)
+                new_name = os.path.basename(path)
+                widget = self.file_list.itemWidget(item)
+                if isinstance(widget, ExplorerItemWidget): 
+                    widget.set_text(new_name)
+                    widget.is_new = False
+                    widget.set_dirty(False)
+                    widget.set_selected_visuals(True)
+                if old_name in self.file_states: 
+                    self.file_states[new_name] = self.file_states.pop(old_name)
+                    self.last_active_filename = new_name
+                
+                if old_name in self.saved_content:
+                    self.saved_content.pop(old_name)
+                self.saved_content[new_name] = self.editor.text()
+
+                self.current_file_path = path
+                self.editor.set_lexer_from_filename(new_name)
+                self.editor.setModified(False)
+                self.apply_editor_fixes()
+
+    def open_settings(self): 
+        SettingsDialog(self).exec()
+
+    def toggle_palette(self):
+        if getattr(self, "_palette_block", False):
+            return
+        if self.palette.isVisible(): 
+            self.palette.hide_animated()
+            self.editor.setFocus()
+        else: 
+            self.palette.show_animated()
+
+    def show_ghost_suggestion(self, text): 
+        self.status_bar.setText(f" Agent Suggestion: [Tab] {text}")
