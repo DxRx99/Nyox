@@ -1,6 +1,7 @@
 import os
 import re
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QColor, QFont, QKeySequence
+from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.Qsci import (QsciScintilla, QsciLexerPython, QsciLexerHTML, 
                         QsciLexerJSON, QsciLexerCSS, QsciLexerMarkdown, 
@@ -40,6 +41,9 @@ class ZenithEditor(QsciScintilla):
         self.setTabWidth(4)
         self.setIndentationGuides(True)
         self.setWrapMode(QsciScintilla.WrapMode.WrapNone)
+
+        # --- ENABLE DRAG AND DROP ---
+        self.setAcceptDrops(True)
 
         # --- FIX: CLEAR SHORTCUT ---
         # Clear 'Ctrl+T' in Scintilla so our app can use it for "New Tab"
@@ -89,8 +93,59 @@ class ZenithEditor(QsciScintilla):
             self.textChanged.connect(self.trigger_spellcheck)
         self.linesChanged.connect(self.update_margin_width)
 
+    # --- DRAG & DROP SUPPORT (FIXED FOR VIDEOS) ---
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            valid_exts = [
+                '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', # Images
+                '.mp4', '.mov', '.avi', '.mkv', '.webm'                   # Videos
+            ]
+            for url in urls:
+                file_path = url.toLocalFile()
+                if any(file_path.lower().endswith(ext) for ext in valid_exts):
+                    event.accept()
+                    return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            valid_exts = [
+                '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp',
+                '.mp4', '.mov', '.avi', '.mkv', '.webm'
+            ]
+            for url in urls:
+                file_path = url.toLocalFile()
+                if any(file_path.lower().endswith(ext) for ext in valid_exts):
+                    import os
+                    filename = os.path.basename(file_path)
+                    # Insert in Markdown format
+                    self.insert(f'![{filename}]({file_path})')
+                    event.accept()
+                    return
+        super().dropEvent(event)
+
     def keyPressEvent(self, event):
-        # Direct Shortcut Injection for Tab Creation
+        # 1. Handle Paste (Ctrl+V) for Files
+        if event.matches(QKeySequence.StandardKey.Paste):
+            clipboard = QApplication.clipboard()
+            mime_data = clipboard.mimeData()
+            if mime_data.hasUrls():
+                urls = mime_data.urls()
+                valid_exts = [
+                    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp',
+                    '.mp4', '.mov', '.avi', '.mkv', '.webm'
+                ]
+                for url in urls:
+                    file_path = url.toLocalFile()
+                    if any(file_path.lower().endswith(ext) for ext in valid_exts):
+                        import os
+                        filename = os.path.basename(file_path)
+                        self.insert(f'![{filename}]({file_path})')
+                        return # Handled custom paste
+
+        # 2. Direct Shortcut Injection for Tab Creation
         if event.key() == Qt.Key.Key_T and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             win = self.window()
             if hasattr(win, "create_new_explorer_item"):
