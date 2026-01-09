@@ -99,6 +99,9 @@ DEFAULT_CONFIG = {
     },
     "behavior": {
         "enable_command_undo": False
+    },
+    "developer": {
+        "debug_notifications": False
     }
 }
 
