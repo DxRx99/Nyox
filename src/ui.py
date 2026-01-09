@@ -7,7 +7,7 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtCore import QUrl
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from PyQt6.QtWidgets import (QToolTip, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QFrame, QLabel, QListWidget, QLineEdit, 
                              QToolBar, QFileDialog, QDialog, QMenu, QToolButton, 
                              QStyle, QFormLayout, QDialogButtonBox, QTabWidget, QTableWidget, 
@@ -114,6 +114,81 @@ class GlobalIconCache:
 def create_icon(shape="x", color="#6c7086", size=24):
     return GlobalIconCache.get_icon(shape, color, size)
 
+class VideoPauseOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 1. Pass mouse events through to the video
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        # 2. CRITICAL: Allow transparency so we can see the dimmed video behind it
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # 1. Dimmed Background (Black with 100/255 alpha)
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+            
+            # 2. Draw Center Circle
+            center = self.rect().center()
+            radius = 35
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.drawEllipse(center, radius, radius)
+            
+            # 3. Draw Play Triangle
+            cx, cy = center.x(), center.y()
+            # Points: (Top-Left, Bottom-Left, Middle-Right)
+            p1 = QPoint(cx - 10, cy - 14)
+            p2 = QPoint(cx - 10, cy + 14)
+            p3 = QPoint(cx + 16, cy)
+            
+            path = QPolygon([p1, p2, p3])
+            painter.setBrush(QColor(255, 255, 255, 240))
+            painter.drawPolygon(path)
+        finally:
+            painter.end()
+            
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Transparent for mouse events so clicking the "Play" icon
+        # actually clicks the video/container underneath
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # 1. Dimmed Background
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+            
+            # 2. Draw Center Circle
+            center = self.rect().center()
+            radius = 35
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.drawEllipse(center, radius, radius)
+            
+            # 3. Draw Play Triangle
+            cx, cy = center.x(), center.y()
+            p1 = QPoint(cx - 10, cy - 14)
+            p2 = QPoint(cx - 10, cy + 14)
+            p3 = QPoint(cx + 16, cy)
+            
+            path = QPolygon([p1, p2, p3])
+            painter.setBrush(QColor(255, 255, 255, 240))
+            painter.drawPolygon(path)
+        finally:
+            # CRITICAL FIX: Ensure painter is closed to prevent QBackingStore crash
+            painter.end()
+            
 # --- FILE LOADER THREAD ---
 class FileLoadWorker(QThread):
     finished_loading = pyqtSignal(str, str, bool) 
@@ -1151,15 +1226,13 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Zenith Settings")
-        self.resize(550, 550)
+        self.resize(600, 600)
         self.parent_window = parent
         
-        # FIX: Store initial theme to prevent spamming restart notification
         self.initial_theme = CONFIG["app"].get("theme_name", "Default Dark")
-        
         self.ensure_default_keybinds()
 
-        # FIX: Explicit color styling for Table Items so they appear in Light Mode
+        # --- STYLE ---
         self.setStyleSheet(f"""
             QDialog {{ background-color: {CONFIG['theme']['bg']}; color: {CONFIG['theme']['fg']}; }}
             QLabel {{ color: {CONFIG['theme']['fg']}; font-size: 14px; font-weight: 500; }}
@@ -1171,14 +1244,14 @@ class SettingsDialog(QDialog):
             QCheckBox {{ color: {CONFIG['theme']['fg']}; spacing: 8px; font-size: 14px; background: transparent; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 1px solid {CONFIG['theme']['comment']}; background: {CONFIG['theme']['sidebar']}; }}
             QCheckBox::indicator:checked {{ background-color: {CONFIG['theme']['function']}; border: 1px solid {CONFIG['theme']['function']}; }}
-              
+            
             QTableWidget {{ 
                 background: transparent; 
                 border: 1px solid {CONFIG['theme']['selection']};
                 border-radius: 6px;
                 gridline-color: transparent; 
                 outline: none;
-                color: {CONFIG['theme']['fg']}; /* CRITICAL FIX FOR LIGHT MODE */
+                color: {CONFIG['theme']['fg']};
                 alternate-background-color: rgba(255, 255, 255, 0.03); 
             }}
             QHeaderView::section {{ 
@@ -1191,18 +1264,10 @@ class SettingsDialog(QDialog):
                 text-transform: uppercase;
                 font-size: 11px;
             }}
-            QTableWidget::item {{ 
-                padding: 8px 12px; 
-                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-                color: {CONFIG['theme']['fg']}; /* CRITICAL FIX */
-            }}
-            QTableWidget::item:selected {{ 
-                background-color: {CONFIG['theme']['selection']}; 
-                border: none;
-                color: {CONFIG['theme']['fg']};
-            }}
+            QTableWidget::item {{ padding: 8px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); color: {CONFIG['theme']['fg']}; }}
+            QTableWidget::item:selected {{ background-color: {CONFIG['theme']['selection']}; border: none; color: {CONFIG['theme']['fg']}; }}
             QTableWidget:focus {{ outline: none; }}
-              
+            
             QPushButton {{ background-color: {CONFIG['theme']['sidebar']}; border: 1px solid {CONFIG['theme']['selection']}; color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 6px 15px; min-width: 60px; }}
             QPushButton:hover {{ background-color: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
             QPushButton:pressed {{ background-color: {CONFIG['theme']['function']}; color: {CONFIG['theme']['bg']}; }}
@@ -1212,53 +1277,65 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         
-        # --- Appearance Tab ---
+        # --- TAB: APPEARANCE ---
         self.tab_appearance = QWidget()
         form_layout = QFormLayout()
         form_layout.setSpacing(15)
         
-        self.font_box = ThemedFontComboBox()
-        self.font_box.setCurrentFont(QFont(CONFIG["editor"]["font_family"]))
-        self.size_box = ModernSpinBox(value=max(8, CONFIG["editor"].get("font_size", 12)))
-        self.line_num_box = QCheckBox("Show Line Numbers")
-        self.line_num_box.setChecked(CONFIG["editor"].get("show_line_numbers", True))
         self.theme_box = ThemedComboBox()
         self.theme_box.addItems(["Default Dark", "Light", "High Contrast", "Dracula", "Monokai", "Solarized", "Nord", "Gruvbox"])
         self.theme_box.setCurrentText(CONFIG["app"].get("theme_name", "Default Dark"))
+        
+        self.font_box = ThemedFontComboBox()
+        self.font_box.setCurrentFont(QFont(CONFIG["editor"]["font_family"]))
+        
+        self.size_box = ModernSpinBox(value=max(8, CONFIG["editor"].get("font_size", 12)))
+        
         self.encoding_box = ThemedComboBox()
         self.encoding_box.addItems(["utf-8", "ascii", "cp1252", "iso-8859-1", "utf-16", "utf-32", "latin-1", "mac_roman", "windows-1250", "shift_jis"])
         self.encoding_box.setCurrentText(CONFIG["editor"].get("encoding", "utf-8"))
         
-        form_layout.addRow("Theme:", self.theme_box)
-        form_layout.addRow("Font Family:", self.font_box)
-        form_layout.addRow("Font Size:", self.size_box)
-        form_layout.addRow("Encoding:", self.encoding_box) 
-        form_layout.addRow("", self.line_num_box)
+        self.line_num_box = QCheckBox("Show Line Numbers")
+        self.line_num_box.setChecked(CONFIG["editor"].get("show_line_numbers", True))
+        
+        form_layout.addRow("Theme:", self.add_help(self.theme_box, "Controls the visual color scheme of the entire application."))
+        form_layout.addRow("Font Family:", self.add_help(self.font_box, "The font used for the main text editor area."))
+        form_layout.addRow("Font Size:", self.add_help(self.size_box, "The size of the text in the editor."))
+        form_layout.addRow("Encoding:", self.add_help(self.encoding_box, "The character encoding used when reading and writing files."))
+        form_layout.addRow("", self.add_help(self.line_num_box, "Toggles the visibility of line numbers in the editor margin."))
+        
         self.tab_appearance.setLayout(form_layout)
         
-        # --- Behavior Tab ---
+        # --- TAB: BEHAVIOR ---
         self.tab_behavior = QWidget()
         behav_layout = QFormLayout()
         behav_layout.setSpacing(15)
         
         self.cursor_blink_box = QCheckBox("Cursor Blinking")
         self.cursor_blink_box.setChecked(CONFIG["editor"].get("cursor_blinking", True))
+        
         self.autosave_box = QCheckBox("Auto-Save Files")
         self.autosave_box.setChecked(CONFIG["app"].get("auto_save", False))
+        
         self.syntax_highlight_box = QCheckBox("Enable System Syntax")
         self.syntax_highlight_box.setChecked(CONFIG["editor"].get("enable_syntax_highlighting", True))
+        
         self.cmd_undo_box = QCheckBox("Enable Command Undo/Redo")
         current_behavior = CONFIG.get("behavior", {})
         self.cmd_undo_box.setChecked(current_behavior.get("enable_command_undo", False))
-        self.cmd_undo_box.setToolTip("Allows Ctrl+Z to undo actions like New Tab/Close Tab if triggered via Command Palette.")
+        
+        self.history_box = QCheckBox("Enable Local History (Time Machine)")
+        self.history_box.setChecked(current_behavior.get("enable_local_history", True))
 
-        behav_layout.addRow("", self.cursor_blink_box)
-        behav_layout.addRow("", self.autosave_box)
-        behav_layout.addRow("", self.syntax_highlight_box)
-        behav_layout.addRow("", self.cmd_undo_box)
+        behav_layout.addRow("", self.add_help(self.cursor_blink_box, "Toggles whether the text cursor blinks or stays solid."))
+        behav_layout.addRow("", self.add_help(self.autosave_box, "Automatically saves changes to disk when you switch tabs or close the app."))
+        behav_layout.addRow("", self.add_help(self.syntax_highlight_box, "Enables color highlighting for code based on file language."))
+        behav_layout.addRow("", self.add_help(self.cmd_undo_box, "Allows 'Undo' (Ctrl+Z) to reverse app actions like closing tabs or renaming, not just text edits."))
+        behav_layout.addRow("", self.add_help(self.history_box, "Automatically saves timestamped snapshots of your files to a hidden .zenith_history folder every 5 minutes."))
+        
         self.tab_behavior.setLayout(behav_layout)
         
-        # --- Keybinds Tab ---
+        # --- TAB: KEYBINDS ---
         self.tab_keys = QWidget()
         key_layout = QVBoxLayout()
         key_layout.setContentsMargins(0, 10, 0, 0)
@@ -1274,25 +1351,85 @@ class SettingsDialog(QDialog):
         self.key_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) 
         self.key_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers) 
         self.key_table.itemDoubleClicked.connect(self.edit_keybind)
-        
         self.key_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.key_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         
         apply_smooth_scroll(self.key_table)
         self.populate_key_table()
-            
         key_layout.addWidget(self.key_table)
         self.tab_keys.setLayout(key_layout)
+
+        # --- TAB: DEVELOPER ---
+        self.tab_developer = QWidget()
+        dev_layout = QFormLayout()
+        dev_layout.setSpacing(15)
         
+        self.debug_notif_box = QCheckBox("Enable Debug Notifications")
+        is_debug = CONFIG.get("developer", {}).get("debug_notifications", False)
+        self.debug_notif_box.setChecked(is_debug)
+        
+        dev_layout.addRow("", self.add_help(self.debug_notif_box, "Shows popup notifications for internal actions like opening/closing tabs (Useful for debugging)."))
+        self.tab_developer.setLayout(dev_layout)
+        
+        # --- FINALIZE ---
         self.tabs.addTab(self.tab_appearance, "Appearance")
         self.tabs.addTab(self.tab_behavior, "Behavior")
         self.tabs.addTab(self.tab_keys, "Keybinds")
+        self.tabs.addTab(self.tab_developer, "Developer")
         layout.addWidget(self.tabs)
         
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.apply_settings)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def add_help(self, widget, text):
+        """Wraps a widget in a layout and adds a clickable Help Button."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        
+        layout.addWidget(widget)
+        
+        btn_help = QToolButton()
+        btn_help.setText("?")
+        btn_help.setFixedSize(18, 18)
+        btn_help.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # Standard tooltip (Hover)
+        btn_help.setToolTip(text)
+        
+        # Force Tooltip on Click
+        btn_help.clicked.connect(lambda: QToolTip.showText(QCursor.pos(), text, btn_help))
+        
+        # --- NEW SUBTLE THEMED STYLE ---
+        btn_help.setStyleSheet(f"""
+            QToolButton {{
+                background-color: transparent;
+                color: {CONFIG['theme']['comment']};
+                border: 1px solid {CONFIG['theme']['comment']}; /* Subtle outline */
+                border-radius: 9px; 
+                font-weight: bold;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11px;
+                padding: 0px;
+                padding-bottom: 2px;
+            }}
+            QToolButton:hover {{
+                background-color: {CONFIG['theme']['function']}; /* Fill with accent on hover */
+                border: 1px solid {CONFIG['theme']['function']};
+                color: {CONFIG['theme']['bg']}; /* High contrast text */
+            }}
+            QToolButton:pressed {{
+                background-color: {CONFIG['theme']['selection']};
+                border-color: {CONFIG['theme']['fg']};
+                color: {CONFIG['theme']['fg']};
+            }}
+        """)
+        
+        layout.addWidget(btn_help)
+        return container
 
     def ensure_default_keybinds(self):
         defaults = {
@@ -1357,6 +1494,10 @@ class SettingsDialog(QDialog):
         
         if "behavior" not in CONFIG: CONFIG["behavior"] = {}
         CONFIG["behavior"]["enable_command_undo"] = self.cmd_undo_box.isChecked()
+        CONFIG["behavior"]["enable_local_history"] = self.history_box.isChecked()
+
+        if "developer" not in CONFIG: CONFIG["developer"] = {}
+        CONFIG["developer"]["debug_notifications"] = self.debug_notif_box.isChecked()
         
         for i in range(self.key_table.rowCount()):
             action_key = self.key_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
@@ -1365,7 +1506,6 @@ class SettingsDialog(QDialog):
             
         save_config() 
         
-        # FIX: Check if theme actually changed
         if new_theme_name != self.initial_theme:
             QMessageBox.information(self, "Restart Required", "Theme changes require a restart to fully apply to all UI elements.")
 
@@ -1540,9 +1680,11 @@ class CommandPalette(QFrame):
     def show_animated(self):
         if time.time() - self.last_close_time > 0.5:
             self.input.clear()
-            self.results.clearSelection()
-            self.results.setCurrentRow(0) 
+            self.results.clearSelection() # Changed from setCurrentRow(0)
+            self.results.setCurrentRow(-1) # Ensure nothing is selected
             self.results.scrollToTop()
+            
+        QApplication.instance().installEventFilter(self)
             
         QApplication.instance().installEventFilter(self)
         
@@ -1639,7 +1781,13 @@ class CommandPalette(QFrame):
         search = text.lower()
         for name, short, func in self.all_commands:
             if search in name.lower(): self.add_item(name, short, func)
-        if self.results.count() > 0: self.results.setCurrentRow(0)
+        
+        # FIX: Only auto-select if user has typed something
+        if self.results.count() > 0 and text.strip(): 
+            self.results.setCurrentRow(0)
+        else:
+            self.results.clearSelection()
+            self.results.setCurrentRow(-1)
 
     def trigger_selected(self):
         item = self.results.currentItem()
@@ -1780,15 +1928,16 @@ class ZoomablePreview(QFrame):
         super().__init__(None) 
         self.main_window = main_window_ref
         
-        # 1. Setup Window Flags
-        self.default_flags = Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+        # 1. FIXED: Use 'Tool' instead of 'ToolTip'. 
+        # ToolTip prevents focus/keyboard input (breaking spacebar/clicks in windowed mode).
+        self.default_flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
         self.setWindowFlags(self.default_flags)
         
         # 2. Transparency & Background
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
-        # Fix: Ensure background paints correctly
         self.setAutoFillBackground(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         
         self.default_style = "QFrame { border: 2px solid #89b4fa; background-color: #1e1e2e; border-radius: 4px; }"
         self.fullscreen_style = "QFrame { background-color: rgba(0, 0, 0, 180); border: none; border-radius: 0px; }"
@@ -1815,6 +1964,10 @@ class ZoomablePreview(QFrame):
         self.player.setVideoOutput(self.video_widget)
         self.player.playbackStateChanged.connect(self.check_video_loop)
 
+        # --- PAUSE OVERLAY ---
+        # Parent to self to sit above video
+        self.pause_overlay = VideoPauseOverlay(self)
+
         # --- Buttons ---
         self.btn_close = ModernOverlayButton(self, "close")
         self.btn_close.clicked.connect(self.hide_preview)
@@ -1839,7 +1992,6 @@ class ZoomablePreview(QFrame):
         self.click_timer.setInterval(250)
         self.click_timer.timeout.connect(self.handle_single_click_action)
         
-        # FIX: Manual Double Click Detection Variables
         self.last_click_time = 0
         self.last_global_pos = QPoint()
 
@@ -1860,25 +2012,30 @@ class ZoomablePreview(QFrame):
         self.image_label.hide()
         self.video_widget.show()
         self.video_widget.lower() 
+        self.pause_overlay.hide() 
         
         self.btn_close.setParent(self)
         self.btn_expand.setParent(self)
         
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
+        self.setFocus() # Grab focus for spacebar
         
         if self.is_fullscreen:
             self.fit_to_container()
         else:
             self.resize(484, 274)
             self.video_widget.setGeometry(2, 2, 480, 270)
+            self.pause_overlay.setGeometry(2, 2, 480, 270)
         
         self.raise_buttons()
-        QTimer.singleShot(100, self.raise_buttons)
+        # Force overlay update slightly after setup to ensure z-order
+        QTimer.singleShot(50, self.raise_buttons)
 
     def setup_image_mode(self, path):
         self.is_video = False
         self.video_widget.hide()
+        self.pause_overlay.hide()
         self.player.stop()
         self.image_label.show()
         self.image_label.lower() 
@@ -1905,6 +2062,13 @@ class ZoomablePreview(QFrame):
     def showEvent(self, event):
         super().showEvent(event)
         self.raise_buttons()
+        self.setFocus() # Ensure focus on show
+
+    def keyPressEvent(self, event):
+        if self.is_video and event.key() == Qt.Key.Key_Space:
+            self.handle_single_click_action() 
+        else:
+            super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         if not self.is_fullscreen or not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -1934,9 +2098,17 @@ class ZoomablePreview(QFrame):
         self.smooth_zoom.start()
         
         self.is_magnified = True
+        
+        if self.is_video:
+             self.pause_overlay.setGeometry(new_x, new_y, new_w, new_h)
+
         event.accept()
 
     def raise_buttons(self):
+        # FIX: Explicitly raise overlay if it's visible
+        if self.is_video and self.pause_overlay.isVisible():
+            self.pause_overlay.raise_()
+            
         self.btn_close.raise_()
         self.btn_expand.raise_()
         self.btn_close.show()
@@ -1962,9 +2134,11 @@ class ZoomablePreview(QFrame):
             self.btn_expand.icon_type = "restore"
             self.show()
             self.fit_to_container()
+            self.setFocus()
         else:
             self.is_fullscreen = False
             self.setParent(None)
+            # Restore Tool flag
             self.setWindowFlags(self.default_flags)
             self.setStyleSheet(self.default_style)
             self.btn_expand.icon_type = "fullscreen"
@@ -1975,12 +2149,19 @@ class ZoomablePreview(QFrame):
             # Reset Position
             target = self.video_widget if self.is_video else self.image_label
             target.setGeometry(2, 2, self.width() - 4, self.height() - 4)
+            if self.is_video: 
+                self.pause_overlay.setGeometry(target.geometry())
+                if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                    self.pause_overlay.show()
+                    self.pause_overlay.raise_()
             
             self.style().unpolish(self)
             self.style().polish(self)
             self.show()
+            self.setFocus()
         
-        self.raise_buttons()
+        # FIX: Force button/overlay raise after a short delay to override video redraw
+        QTimer.singleShot(50, self.raise_buttons)
 
     def fit_to_container(self):
         w, h = self.width(), self.height()
@@ -1996,6 +2177,12 @@ class ZoomablePreview(QFrame):
         target_widget = self.video_widget if self.is_video else self.image_label
         self.smooth_zoom.stop()
         target_widget.setGeometry(target_rect)
+        
+        if self.is_video: 
+            self.pause_overlay.setGeometry(target_rect)
+            if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self.pause_overlay.raise_()
+        
         self.is_magnified = False
         if not self.is_video: self.refresh_view_quality()
 
@@ -2006,16 +2193,24 @@ class ZoomablePreview(QFrame):
         self.btn_close.move(self.width() - btn_w - padding, padding)
         self.btn_expand.move(self.width() - btn_w - padding, self.height() - btn_w - padding)
         
+        # FIX: Ensure overlay follows video on every resize
+        if self.is_video:
+            self.pause_overlay.setGeometry(self.video_widget.geometry())
+
         if not self.is_fullscreen:
             target = self.video_widget if self.is_video else self.image_label
             target.setGeometry(2, 2, self.width() - 4, self.height() - 4)
+            if self.is_video: 
+                self.pause_overlay.setGeometry(target.geometry())
         elif self.is_fullscreen and not self.is_magnified: 
             self.fit_to_container()
             
         self.raise_buttons()
 
     def check_video_loop(self, state):
-        if state == QMediaPlayer.PlaybackState.StoppedState and self.isVisible(): self.player.play()
+        if state == QMediaPlayer.PlaybackState.StoppedState and self.isVisible():
+            self.player.play()
+            self.pause_overlay.hide()
     
     def refresh_view_quality(self):
         if self.original_pixmap.isNull(): return
@@ -2027,21 +2222,25 @@ class ZoomablePreview(QFrame):
         if self.is_fullscreen: self.toggle_fullscreen()
 
     def handle_single_click_action(self):
-        # This only runs if NO second click happened within 250ms
         if self.is_video:
-            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState: self.player.pause()
-            else: self.player.play()
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.player.pause()
+                self.pause_overlay.setGeometry(self.video_widget.geometry())
+                self.pause_overlay.show()
+                # FIX: Force raise immediately after showing
+                self.pause_overlay.raise_()
+                self.raise_buttons()
+            else:
+                self.player.play()
+                self.pause_overlay.hide()
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            # FIX: Manual Double Click Detection
-            # QVideoWidget sometimes swallows double clicks, so we check timing manually.
+        if event.button() == Qt.MouseButton.LeftButton: 
             curr_time = time.time()
             if (curr_time - self.last_click_time) < 0.3:
-                # Double Click Detected!
-                self.click_timer.stop() # Cancel single click action
+                self.click_timer.stop() 
                 self.toggle_fullscreen()
-                self.last_click_time = 0 # Reset so triple click doesn't trigger again
+                self.last_click_time = 0 
                 return
             
             self.last_click_time = curr_time
@@ -2070,6 +2269,9 @@ class ZoomablePreview(QFrame):
              target = self.video_widget if self.is_video else self.image_label
              target.move(target.pos() + delta)
              
+             if self.is_video:
+                 self.pause_overlay.move(target.pos())
+
              self.last_global_pos = current_pos
              return
 
@@ -2077,11 +2279,9 @@ class ZoomablePreview(QFrame):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton: 
-            # Start timer. If another click comes < 0.3s, timer will be stopped in mousePressEvent
             self.click_timer.start()
             event.accept()
     
-    # We leave this for the Image Label which supports it natively
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.click_timer.stop()
@@ -2090,9 +2290,12 @@ class ZoomablePreview(QFrame):
 
     def eventFilter(self, source, event):
         if source == self.video_widget:
-            # Manually pipe press events to our custom handler
             if event.type() == QEvent.Type.MouseButtonPress: 
                 self.mousePressEvent(event)
+                return True
+            
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                self.mouseReleaseEvent(event)
                 return True
             
             if event.type() == QEvent.Type.MouseMove: 
@@ -2100,6 +2303,184 @@ class ZoomablePreview(QFrame):
                 if (event.buttons() & Qt.MouseButton.LeftButton) and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
                     self.mouseMoveEvent(event)
         return super().eventFilter(source, event)
+    
+class NotificationPopup(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        
+        # 1. Main Layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10) 
+        
+        # 2. The Visible Card
+        self.card = QFrame()
+        self.card.setObjectName("NotifyCard")
+        
+        # Horizontal layout for the card content
+        card_layout = QHBoxLayout(self.card)
+        card_layout.setContentsMargins(10, 10, 15, 10)
+        card_layout.setSpacing(10)
+        
+        # 3. The Single Close Button (Left Side)
+        self.left_close_btn = QToolButton()
+        self.left_close_btn.setFixedSize(26, 26)
+        self.left_close_btn.setIconSize(QSize(18, 18))
+        self.left_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.left_close_btn.setToolTip("Close")
+        self.left_close_btn.clicked.connect(self.hide_animated)
+        
+        # 4. Text Label
+        self.text_label = QLabel()
+        self.text_label.setWordWrap(False)
+        self.text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        # Add widgets
+        card_layout.addWidget(self.left_close_btn)
+        card_layout.addWidget(self.text_label, 1)
+        
+        layout.addWidget(self.card)
+        
+        # 5. Drop Shadow
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setXOffset(0)
+        shadow.setYOffset(4)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        self.card.setGraphicsEffect(shadow)
+        
+        # 6. Timer & Animation
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide_animated)
+        
+        self._active_anim_group = None
+
+    def update_position(self):
+        """Called by MainWindow when it moves to keep notification attached."""
+        if not self.isVisible() or not self.parent(): return
+        
+        parent_geo = self.parent().geometry()
+        # Calculate target position (Bottom Right) relative to new parent position
+        target_x = parent_geo.x() + parent_geo.width() - self.width() - 25
+        target_y = parent_geo.y() + parent_geo.height() - self.height() - 35
+        
+        # Simply move to the new spot
+        self.move(target_x, target_y)
+
+    def show_message(self, message, duration=3000, is_error=False):
+        if self._active_anim_group:
+            self._active_anim_group.stop()
+            self._active_anim_group = None
+        self.timer.stop()
+
+        # --- THEME COLORS ---
+        bg = CONFIG['theme']['sidebar']
+        fg = CONFIG['theme']['fg']
+        border = CONFIG['theme']['selection']
+        accent_color = "#ff5555" if is_error else CONFIG['theme']['function']
+        
+        # --- STYLESHEET ---
+        self.card.setStyleSheet(f"""
+            #NotifyCard {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-left: 4px solid {accent_color}; 
+                border-radius: 6px;
+            }}
+            QLabel {{
+                color: {fg};
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px;
+                font-weight: 600;
+                border: none;
+                background: transparent;
+            }}
+            QToolButton {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }}
+            QToolButton:hover {{
+                background-color: #ff5555; 
+            }}
+        """)
+        
+        self.text_label.setText(message)
+        self.text_label.adjustSize()
+        
+        # --- ICON SETUP ---
+        self.left_close_btn.setIcon(create_icon("x", fg, 18))
+        
+        # --- POSITIONING ---
+        self.adjustSize() 
+        
+        if self.parent():
+            parent_geo = self.parent().geometry()
+            target_x = parent_geo.x() + parent_geo.width() - self.width() - 25
+            target_y = parent_geo.y() + parent_geo.height() - self.height() - 35
+            start_y = target_y + 20 
+            
+            self.move(target_x, start_y)
+            self.setWindowOpacity(0.0)
+            self.show()
+            self.raise_()
+            
+            # --- ANIMATION ---
+            anim_group = QParallelAnimationGroup(self)
+            
+            anim_pos = QPropertyAnimation(self, b"pos")
+            anim_pos.setDuration(250)
+            anim_pos.setStartValue(QPoint(target_x, start_y))
+            anim_pos.setEndValue(QPoint(target_x, target_y))
+            anim_pos.setEasingCurve(QEasingCurve.Type.OutCubic)
+            
+            anim_opacity = QPropertyAnimation(self, b"windowOpacity")
+            anim_opacity.setDuration(200)
+            anim_opacity.setStartValue(0.0)
+            anim_opacity.setEndValue(1.0)
+            
+            anim_group.addAnimation(anim_pos)
+            anim_group.addAnimation(anim_opacity)
+            
+            self._active_anim_group = anim_group
+            anim_group.start()
+            
+        self.timer.start(duration)
+
+    def hide_animated(self):
+        if not self.isVisible(): return
+
+        if self._active_anim_group:
+            self._active_anim_group.stop()
+            self._active_anim_group = None
+
+        current_pos = self.pos()
+        target_y = current_pos.y() + 20
+        
+        anim_group = QParallelAnimationGroup(self)
+        
+        anim_pos = QPropertyAnimation(self, b"pos")
+        anim_pos.setDuration(200)
+        anim_pos.setStartValue(current_pos)
+        anim_pos.setEndValue(QPoint(current_pos.x(), target_y))
+        anim_pos.setEasingCurve(QEasingCurve.Type.InQuad)
+        
+        anim_opacity = QPropertyAnimation(self, b"windowOpacity")
+        anim_opacity.setDuration(150)
+        anim_opacity.setStartValue(self.windowOpacity())
+        anim_opacity.setEndValue(0.0)
+        
+        anim_group.addAnimation(anim_pos)
+        anim_group.addAnimation(anim_opacity)
+        
+        anim_group.finished.connect(self.hide)
+        
+        self._active_anim_group = anim_group
+        anim_group.start()
     
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -2125,10 +2506,14 @@ class MainWindow(QMainWindow):
         self._extra_shortcuts = [] 
         border_col = CONFIG['theme']['selection']
         
+        # --- NOTIFICATION SYSTEM ---
+        self.notification_popup = NotificationPopup(self)
+    
         # 3. Setup Toolbar
         self.toolbar = QToolBar()
         self.toolbar.setIconSize(QSize(20, 20))
         self.toolbar.setMovable(False)
+        self.toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
         self.addToolBar(self.toolbar)
         
         self.btn_sidebar = QToolButton()
@@ -2292,6 +2677,28 @@ class MainWindow(QMainWindow):
         
         # CRITICAL FIX: Force theme application at startup to override hardcoded white icons
         self.apply_theme()
+        
+        BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
+        
+        self.refresh_shortcuts()
+        QTimer.singleShot(0, self.delayed_startup)
+        self.apply_theme()
+
+        # --- TIME MACHINE TIMER (5 Minutes) ---
+        self.history_timer = QTimer(self)
+        self.history_timer.setInterval(300000) # 5 minutes in ms
+        self.history_timer.timeout.connect(self.perform_auto_snapshot)
+        self.history_timer.start()
+        
+    def perform_auto_snapshot(self):
+        
+        # Snapshot the currently active editor content
+        if self.current_file_path and os.path.exists(self.current_file_path):
+            current_content = self.editor.text()
+            self.create_snapshot(self.current_file_path, current_content)
+            self.status_bar.setText(" Time Machine: Snapshot saved.")
+        
+        
 
     def resizeEvent(self, event):
         # Update floating bars position
@@ -2301,9 +2708,10 @@ class MainWindow(QMainWindow):
         self.goto_bar.update_position()
         self.global_search_bar.update_position()
 
-        if hasattr(self, 'image_preview') and self.image_preview.isVisible() and self.image_preview.is_fullscreen:
-            self.image_preview.setGeometry(0, 0, self.width(), self.height())
-            self.image_preview.fit_to_container()
+        if hasattr(self, 'notification_popup') and self.notification_popup.isVisible():
+            pw = self.width()
+            ph = self.height()
+            self.notification_popup.move(pw - self.notification_popup.width() - 20, ph - self.notification_popup.height() - 40)
         super().resizeEvent(event)
 
     def check_line_for_image(self, line, index):
@@ -2370,9 +2778,15 @@ class MainWindow(QMainWindow):
             return
 
         self.image_preview.hide_preview()
+        
+    def notify(self, message, is_error=False):
+        self.notification_popup.show_message(message, is_error=is_error)
+
+    def debug_notify(self, action_name):
+        if CONFIG.get("developer", {}).get("debug_notifications", False):
+            self.notify(f"[Debug] {action_name}")
 
     def apply_theme(self):
-        """Forces a complete refresh of all UI styles from the current CONFIG."""
         theme = CONFIG['theme']
         
         # 1. Detect Light vs Dark Theme
@@ -2664,11 +3078,14 @@ class MainWindow(QMainWindow):
                 item = self.add_sidebar_item(fname)
                 self.file_list.setCurrentItem(item)
 
+    # In MainWindow class...
+
     def save_file(self):
         item = self.file_list.currentItem()
         if not item: return
         name = self.get_widget_text(item)
         content = self.editor.text()
+        
         self.file_states[name] = content
         self.saved_content[name] = content
         
@@ -2679,11 +3096,28 @@ class MainWindow(QMainWindow):
         if os.path.exists(name):
              enc = CONFIG["editor"].get("encoding", "utf-8")
              try:
-                 with open(name, 'w', encoding=enc) as f: 
-                     f.write(content)
+                with open(name, 'w', encoding=enc) as f: 
+                    f.write(content)
+                
+                self.notify(f"Saved {os.path.basename(name)}")
+                
+                # CHECK SETTING BEFORE CREATING SNAPSHOT
+                if CONFIG.get("behavior", {}).get("enable_local_history", True):
+                    self.create_snapshot(name, content)
+
              except Exception as e:
                  QMessageBox.critical(self, "Save Error", str(e))
         else: self.save_as()
+
+    def perform_auto_snapshot(self):
+        # CHECK SETTING BEFORE RUNNING AUTO-SNAPSHOT
+        if not CONFIG.get("behavior", {}).get("enable_local_history", True):
+            return
+
+        if self.current_file_path and os.path.exists(self.current_file_path):
+            current_content = self.editor.text()
+            self.create_snapshot(self.current_file_path, current_content)
+            self.status_bar.setText(" Time Machine: Snapshot saved.")
 
     def save_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Text Files (*.txt);;All Files (*)")
@@ -2718,13 +3152,16 @@ class MainWindow(QMainWindow):
 
     def open_settings(self): 
         SettingsDialog(self).exec()
+        self.debug_notify("Settings Dialog Closed")
 
     def toggle_palette(self):
         if self.palette.isVisible(): 
             self.palette.hide_animated()
             self.editor.setFocus()
+            self.debug_notify("Command Palette Closed")
         else: 
             self.palette.show_animated()
+            self.debug_notify("Command Palette Opened")
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
@@ -2833,6 +3270,39 @@ class MainWindow(QMainWindow):
             self.editor.setDisabled(True)
             self.editor.setVisible(False)
             self.top_bar.setVisible(False)
+            
+    def create_snapshot(self, filepath, content):
+       
+        if not filepath or not content: return
+
+        try:
+            # 1. Determine History Folder
+            file_dir = os.path.dirname(filepath)
+            history_dir = os.path.join(file_dir, ".zenith_history")
+            
+            if not os.path.exists(history_dir):
+                os.makedirs(history_dir)
+                # On Windows, try to hide the folder
+                if os.name == 'nt':
+                    import ctypes
+                    ctypes.windll.kernel32.SetFileAttributesW(history_dir, 2)
+
+            # 2. Generate Timestamped Filename
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = os.path.basename(filepath)
+            backup_name = f"{filename}_{timestamp}.bak"
+            backup_path = os.path.join(history_dir, backup_name)
+
+            # 3. Write Snapshot
+            enc = CONFIG["editor"].get("encoding", "utf-8")
+            with open(backup_path, 'w', encoding=enc) as f:
+                f.write(content)
+            
+            # Optional: Clean up old history (keep last 50 snapshots per folder)
+            # self.cleanup_history(history_dir)
+            
+        except Exception as e:
+            print(f"Time Machine Error: {e}")
 
     def on_file_loaded(self, name, content, success):
         self.editor.setDisabled(False)
@@ -2994,6 +3464,7 @@ class MainWindow(QMainWindow):
         self.editor.setModified(False) 
         
         self.apply_editor_fixes()
+        self.debug_notify("New Tab Opened")
         
         if register_undo and CONFIG.get("behavior", {}).get("enable_command_undo", False):
             self.register_command_action(
@@ -3009,6 +3480,7 @@ class MainWindow(QMainWindow):
 
     def close_explorer_tab(self, item):
         self._do_close_tab(item, register_undo=False)
+        self.debug_notify("Tab Closed")
 
     def _do_close_tab(self, item, register_undo=False):
         name = self.get_widget_text(item)
@@ -3068,5 +3540,11 @@ class MainWindow(QMainWindow):
             )
 
     def moveEvent(self, event):
-        if self.palette.isVisible(): self.palette.update_overlay_position()
+        # Update command palette position
+        if self.palette.isVisible(): 
+            self.palette.update_overlay_position()
+            
+        if hasattr(self, 'notification_popup'):
+            self.notification_popup.update_position()
+            
         super().moveEvent(event)
