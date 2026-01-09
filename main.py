@@ -3,26 +3,26 @@ from PyQt6.QtWidgets import QApplication, QToolTip
 from PyQt6.QtGui import QFont
 from src.ui import MainWindow
 from src.agent import AgentWorker
+from src.updater import UPM # Import the UPM
 
 def main():
     app = QApplication(sys.argv)
     
-    # CRITICAL FIX 1: Use 'Fusion' style. 
-    # Windows native style ignores custom scrollbar rounding (border-radius).
-    # Fusion style respects all CSS styling.
+    # --- UPM CHECK ---
+    # Check for updates silently on startup
+    if UPM.check_for_updates():
+        print("Update available. In a real app, prompt user here.")
+        # UPM.apply_update() 
+
     app.setStyle("Fusion")
     
-    # CRITICAL FIX 2: Set global font + ToolTip font to stop terminal spam.
-    # The "Point size <= 0" error often comes from uninitialized ToolTips or Popups.
     default_font = QFont("Segoe UI", 10)
     app.setFont(default_font)
     QToolTip.setFont(default_font)
     
-    # Start the UI
     window = MainWindow()
     window.show()
     
-    # Start the Agent (Background Thread)
     agent = AgentWorker()
     agent.start()
     
