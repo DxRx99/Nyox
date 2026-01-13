@@ -117,77 +117,43 @@ def create_icon(shape="x", color="#6c7086", size=24):
 class VideoPauseOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 1. Pass mouse events through to the video
+        # 1. Pass mouse events through (Click-through)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         
-        # 2. CRITICAL: Allow transparency so we can see the dimmed video behind it
+        # 2. Transparency settings
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
+        # 3. Native Window - Essential for sitting on top of hardware video
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        
         self.hide()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # 1. Dimmed Background (Black with 100/255 alpha)
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-            
-            # 2. Draw Center Circle
-            center = self.rect().center()
-            radius = 35
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 150))
-            painter.drawEllipse(center, radius, radius)
-            
-            # 3. Draw Play Triangle
-            cx, cy = center.x(), center.y()
-            # Points: (Top-Left, Bottom-Left, Middle-Right)
-            p1 = QPoint(cx - 10, cy - 14)
-            p2 = QPoint(cx - 10, cy + 14)
-            p3 = QPoint(cx + 16, cy)
-            
-            path = QPolygon([p1, p2, p3])
-            painter.setBrush(QColor(255, 255, 255, 240))
-            painter.drawPolygon(path)
-        finally:
-            painter.end()
-            
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # Transparent for mouse events so clicking the "Play" icon
-        # actually clicks the video/container underneath
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.hide()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # 1. Dimmed Background
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-            
-            # 2. Draw Center Circle
-            center = self.rect().center()
-            radius = 35
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 150))
-            painter.drawEllipse(center, radius, radius)
-            
-            # 3. Draw Play Triangle
-            cx, cy = center.x(), center.y()
-            p1 = QPoint(cx - 10, cy - 14)
-            p2 = QPoint(cx - 10, cy + 14)
-            p3 = QPoint(cx + 16, cy)
-            
-            path = QPolygon([p1, p2, p3])
-            painter.setBrush(QColor(255, 255, 255, 240))
-            painter.drawPolygon(path)
-        finally:
-            # CRITICAL FIX: Ensure painter is closed to prevent QBackingStore crash
-            painter.end()
+        # Use standard blending to avoid artifacts
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 1. Dimmed Background
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        
+        # 2. Draw Center Circle
+        center = self.rect().center()
+        radius = 35
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawEllipse(center, radius, radius)
+        
+        # 3. Draw Play Triangle
+        cx, cy = center.x(), center.y()
+        p1 = QPoint(cx - 10, cy - 14)
+        p2 = QPoint(cx - 10, cy + 14)
+        p3 = QPoint(cx + 16, cy)
+        
+        path = QPolygon([p1, p2, p3])
+        painter.setBrush(QColor(255, 255, 255, 240))
+        painter.drawPolygon(path)
+        painter.end()
             
 # --- FILE LOADER THREAD ---
 class FileLoadWorker(QThread):
@@ -1922,14 +1888,12 @@ class ModernOverlayButton(QToolButton):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(c.x()-3, c.y()-3, 6, 6)
 
-# --- ZOOMABLE PREVIEW (Fixed Double Click Logic) ---
 class ZoomablePreview(QFrame):
     def __init__(self, main_window_ref):
         super().__init__(None) 
         self.main_window = main_window_ref
         
-        # 1. FIXED: Use 'Tool' instead of 'ToolTip'. 
-        # ToolTip prevents focus/keyboard input (breaking spacebar/clicks in windowed mode).
+        # 1. Window Flags
         self.default_flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
         self.setWindowFlags(self.default_flags)
         
@@ -1955,7 +1919,8 @@ class ZoomablePreview(QFrame):
         
         # --- Video Widget ---
         self.video_widget = QVideoWidget(self)
-        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors, True)
         self.video_widget.setStyleSheet("background-color: #000000; border: none;")
         
         self.player = QMediaPlayer()
@@ -1965,9 +1930,9 @@ class ZoomablePreview(QFrame):
         self.player.playbackStateChanged.connect(self.check_video_loop)
 
         # --- PAUSE OVERLAY ---
-        # Parent to self to sit above video
+        # Sibling to video_widget (Child of ZoomablePreview)
         self.pause_overlay = VideoPauseOverlay(self)
-
+        
         # --- Buttons ---
         self.btn_close = ModernOverlayButton(self, "close")
         self.btn_close.clicked.connect(self.hide_preview)
@@ -1999,6 +1964,18 @@ class ZoomablePreview(QFrame):
         self.video_widget.installEventFilter(self)
         self.setMouseTracking(True)
 
+    def force_overlay_visible(self):
+        """Aggressively force the overlay to the top of the stack."""
+        if self.is_video and self.pause_overlay.isVisible():
+            # 1. Ensure geometry matches
+            self.pause_overlay.setGeometry(self.video_widget.geometry())
+            # 2. Force Raise
+            self.pause_overlay.raise_()
+            # 3. Force Video Lower
+            self.video_widget.stackUnder(self.pause_overlay)
+            # 4. Force Repaint
+            self.pause_overlay.repaint()
+
     def set_content(self, path):
         self.current_path = path
         video_exts = ['.mp4', '.webm', '.mkv', '.avi', '.mov']
@@ -2019,18 +1996,18 @@ class ZoomablePreview(QFrame):
         
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.play()
-        self.setFocus() # Grab focus for spacebar
+        self.setFocus() 
         
         if self.is_fullscreen:
             self.fit_to_container()
         else:
             self.resize(484, 274)
             self.video_widget.setGeometry(2, 2, 480, 270)
-            self.pause_overlay.setGeometry(2, 2, 480, 270)
+            self.pause_overlay.setGeometry(self.video_widget.geometry())
         
         self.raise_buttons()
         # Force overlay update slightly after setup to ensure z-order
-        QTimer.singleShot(50, self.raise_buttons)
+        QTimer.singleShot(50, self.force_overlay_visible)
 
     def setup_image_mode(self, path):
         self.is_video = False
@@ -2062,7 +2039,7 @@ class ZoomablePreview(QFrame):
     def showEvent(self, event):
         super().showEvent(event)
         self.raise_buttons()
-        self.setFocus() # Ensure focus on show
+        self.setFocus() 
 
     def keyPressEvent(self, event):
         if self.is_video and event.key() == Qt.Key.Key_Space:
@@ -2100,21 +2077,20 @@ class ZoomablePreview(QFrame):
         self.is_magnified = True
         
         if self.is_video:
+             # Manually resize overlay on zoom
              self.pause_overlay.setGeometry(new_x, new_y, new_w, new_h)
 
         event.accept()
 
     def raise_buttons(self):
-        # FIX: Explicitly raise overlay if it's visible
-        if self.is_video and self.pause_overlay.isVisible():
-            self.pause_overlay.raise_()
-            
+        # Stack overlay on top of video
+        if self.is_video:
+            self.force_overlay_visible()
+        
         self.btn_close.raise_()
         self.btn_expand.raise_()
         self.btn_close.show()
         self.btn_expand.show()
-        self.btn_close.repaint()
-        self.btn_expand.repaint()
 
     def toggle_fullscreen(self):
         QTimer.singleShot(0, self._do_toggle_fullscreen)
@@ -2138,7 +2114,6 @@ class ZoomablePreview(QFrame):
         else:
             self.is_fullscreen = False
             self.setParent(None)
-            # Restore Tool flag
             self.setWindowFlags(self.default_flags)
             self.setStyleSheet(self.default_style)
             self.btn_expand.icon_type = "fullscreen"
@@ -2146,21 +2121,21 @@ class ZoomablePreview(QFrame):
             if self.saved_geometry:
                 self.setGeometry(self.saved_geometry)
             
-            # Reset Position
             target = self.video_widget if self.is_video else self.image_label
             target.setGeometry(2, 2, self.width() - 4, self.height() - 4)
-            if self.is_video: 
+            if self.is_video:
                 self.pause_overlay.setGeometry(target.geometry())
-                if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-                    self.pause_overlay.show()
-                    self.pause_overlay.raise_()
             
             self.style().unpolish(self)
             self.style().polish(self)
             self.show()
             self.setFocus()
         
-        # FIX: Force button/overlay raise after a short delay to override video redraw
+        # CRITICAL: Re-assert overlay visibility AFTER the fullscreen redraw finishes
+        if self.is_video and self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            QTimer.singleShot(100, self.force_overlay_visible)
+            QTimer.singleShot(300, self.force_overlay_visible) # Safety second check
+        
         QTimer.singleShot(50, self.raise_buttons)
 
     def fit_to_container(self):
@@ -2181,7 +2156,9 @@ class ZoomablePreview(QFrame):
         if self.is_video: 
             self.pause_overlay.setGeometry(target_rect)
             if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-                self.pause_overlay.raise_()
+                self.force_overlay_visible()
+            else:
+                self.pause_overlay.hide()
         
         self.is_magnified = False
         if not self.is_video: self.refresh_view_quality()
@@ -2193,7 +2170,6 @@ class ZoomablePreview(QFrame):
         self.btn_close.move(self.width() - btn_w - padding, padding)
         self.btn_expand.move(self.width() - btn_w - padding, self.height() - btn_w - padding)
         
-        # FIX: Ensure overlay follows video on every resize
         if self.is_video:
             self.pause_overlay.setGeometry(self.video_widget.geometry())
 
@@ -2227,8 +2203,7 @@ class ZoomablePreview(QFrame):
                 self.player.pause()
                 self.pause_overlay.setGeometry(self.video_widget.geometry())
                 self.pause_overlay.show()
-                # FIX: Force raise immediately after showing
-                self.pause_overlay.raise_()
+                self.force_overlay_visible()
                 self.raise_buttons()
             else:
                 self.player.play()
@@ -2290,6 +2265,13 @@ class ZoomablePreview(QFrame):
 
     def eventFilter(self, source, event):
         if source == self.video_widget:
+            # FIX: Ensure overlay follows video on every move
+            if event.type() == QEvent.Type.Move or event.type() == QEvent.Type.Resize:
+                if self.is_video:
+                    self.pause_overlay.setGeometry(self.video_widget.geometry())
+                    if self.pause_overlay.isVisible():
+                         self.force_overlay_visible()
+
             if event.type() == QEvent.Type.MouseButtonPress: 
                 self.mousePressEvent(event)
                 return True
