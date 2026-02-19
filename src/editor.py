@@ -16,7 +16,6 @@ except ImportError:
 
 from .core import BUS, CONFIG
 
-# Dynamic Lexer Mapping
 LEXER_MAP = {
     '.html': QsciLexerHTML, '.xml': QsciLexerHTML, '.php': QsciLexerHTML,
     '.json': QsciLexerJSON,
@@ -46,9 +45,7 @@ class ZenithEditor(QsciScintilla):
         self.setAcceptDrops(True)
 
         # --- FIX: CLEAR SHORTCUT ---
-        # Clear 'Ctrl+T' in Scintilla so our app can use it for "New Tab"
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('T') | (QsciScintilla.SCMOD_CTRL << 16))
-        # Clear 'Ctrl+F' and 'Ctrl+G' so Main Window handles them
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('F') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('G') | (QsciScintilla.SCMOD_CTRL << 16))
 
@@ -87,7 +84,6 @@ class ZenithEditor(QsciScintilla):
 
         self.setBraceMatching(QsciScintilla.BraceMatch.SloppyBraceMatch)
         
-        # Signals
         self.textChanged.connect(self.emit_change)
         if HAS_SPELLCHECK:
             self.textChanged.connect(self.trigger_spellcheck)
@@ -120,14 +116,12 @@ class ZenithEditor(QsciScintilla):
                 if any(file_path.lower().endswith(ext) for ext in valid_exts):
                     import os
                     filename = os.path.basename(file_path)
-                    # Insert in Markdown format
                     self.insert(f'![{filename}]({file_path})')
                     event.accept()
                     return
         super().dropEvent(event)
 
     def keyPressEvent(self, event):
-        # 1. Handle Paste (Ctrl+V) for Files
         if event.matches(QKeySequence.StandardKey.Paste):
             clipboard = QApplication.clipboard()
             mime_data = clipboard.mimeData()
@@ -145,7 +139,6 @@ class ZenithEditor(QsciScintilla):
                         self.insert(f'![{filename}]({file_path})')
                         return # Handled custom paste
 
-        # 2. Direct Shortcut Injection for Tab Creation
         if event.key() == Qt.Key.Key_T and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             win = self.window()
             if hasattr(win, "create_new_explorer_item"):
@@ -220,7 +213,6 @@ class ZenithEditor(QsciScintilla):
         self.api.prepare()
 
     def emit_change(self):
-        # Optimized: Do not send full text content
         BUS.editor_text_changed.emit("changed")
 
     def update_margin_width(self):
@@ -285,3 +277,4 @@ class ZenithEditor(QsciScintilla):
                     self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, self.SPELLCHECK_INDICATOR)
                     self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE, start_byte, length_byte)
             except: pass
+
