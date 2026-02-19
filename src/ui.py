@@ -83,7 +83,6 @@ class GlobalIconCache:
             painter.drawLine(handle_start_x, handle_start_y, handle_end_x, handle_end_y)
 
         elif shape == "rename_box":
-            # Fix rect drawing to ensure it fits
             box_rect = QRect(3, 5, size - 7, size - 10)
             painter.drawRoundedRect(box_rect, 2, 2)
             
@@ -95,7 +94,6 @@ class GlobalIconCache:
             top_y = 9
             bot_y = size - 9
             
-            # Draw I-beam cursor inside box
             painter.drawLine(cx_cursor, top_y, cx_cursor, bot_y)
             cap_size = 2
             painter.drawLine(cx_cursor - cap_size, top_y, cx_cursor + cap_size, top_y)
@@ -117,34 +115,27 @@ def create_icon(shape="x", color="#6c7086", size=24):
 class VideoPauseOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 1. Pass mouse events through (Click-through)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         
-        # 2. Transparency settings
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        
-        # 3. Native Window - Essential for sitting on top of hardware video
+
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         
         self.hide()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        # Use standard blending to avoid artifacts
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # 1. Dimmed Background
         painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
         
-        # 2. Draw Center Circle
         center = self.rect().center()
         radius = 35
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(0, 0, 0, 150))
         painter.drawEllipse(center, radius, radius)
         
-        # 3. Draw Play Triangle
         cx, cy = center.x(), center.y()
         p1 = QPoint(cx - 10, cy - 14)
         p2 = QPoint(cx - 10, cy + 14)
@@ -209,7 +200,7 @@ class EditorOverlayBar(QFrame):
     def __init__(self, parent_editor):
         super().__init__(parent_editor)
         self.editor = parent_editor
-        self.setFixedHeight(50) # Default, override in subclasses if needed
+        self.setFixedHeight(50) 
         self.setFixedWidth(400)
         self.hide()
         
@@ -252,7 +243,6 @@ class EditorOverlayBar(QFrame):
         
 
     def update_position(self):
-        # Top right corner
         parent_width = self.parent().width()
         if self.isVisible():
             self.move(parent_width - self.width() - 25, 0)
@@ -267,7 +257,6 @@ class EditorOverlayBar(QFrame):
         
         parent_width = self.parent().width()
         
-        # 1. Force position to "Hidden" state (Above view)
         start_x = parent_width - self.width() - 25
         start_y = -self.height() - 10
         self.move(start_x, start_y)
@@ -276,7 +265,6 @@ class EditorOverlayBar(QFrame):
         self.show()
         self.raise_()
         
-        # 2. Animate to "Visible" state (Top edge)
         end_pos = QPoint(start_x, 0)
         
         self.anim.stop() 
@@ -320,11 +308,9 @@ class EditorOverlayBar(QFrame):
             QPushButton:hover {{ background: {border}; border: 1px solid {func}; }}
         """)
         
-        # Update children icons if they exist
         if hasattr(self, 'icon'):
             self.icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], 16).pixmap(16, 16))
         
-        # Update buttons
         for child in self.findChildren(QToolButton):
             if child is not getattr(self, 'btn_close', None):
                  # Generic update for arrow buttons
@@ -333,7 +319,6 @@ class EditorOverlayBar(QFrame):
         if hasattr(self, 'btn_close'):
              self.btn_close.setIcon(create_icon("x", CONFIG['theme']['fg'], 14))
 
-        # Re-polish to ensure updates apply immediately
         self.style().unpolish(self)
         self.style().polish(self)
         
@@ -421,8 +406,7 @@ class FindBar(EditorOverlayBar):
     def find_prev(self):
         text = self.input.text()
         if not text: return
-        
-        # Move Caret to start of selection to prevent getting stuck
+      
         if self.editor.hasSelectedText():
             lf, if_, _, _ = self.editor.getSelection()
             if lf != -1:
@@ -494,11 +478,9 @@ class GlobalSearchBar(EditorOverlayBar):
         super().__init__(parent_editor)
         self.main_window = main_window_ref
         
-        # Initialize geometry
         self.setFixedHeight(50) 
         self.setFixedWidth(500) 
         
-        # Main vertical layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -507,7 +489,6 @@ class GlobalSearchBar(EditorOverlayBar):
         top_container = QWidget()
         top_container.setFixedHeight(50)
         
-        # Bottom border only
         top_container.setStyleSheet(f"""
             background-color: {CONFIG['theme']['sidebar']};
             border-bottom: 1px solid {CONFIG['theme']['selection']};
@@ -524,8 +505,7 @@ class GlobalSearchBar(EditorOverlayBar):
         
         self.input = QLineEdit()
         self.input.setPlaceholderText("Search all open files...")
-        
-        # Input Box Style
+      
         bg_color = "rgba(255, 255, 255, 0.05)"
         border_col = CONFIG['theme']['selection']
         fg_col = CONFIG['theme']['fg']
@@ -566,7 +546,6 @@ class GlobalSearchBar(EditorOverlayBar):
         self.results_list.itemClicked.connect(self.on_item_clicked)
         self.results_list.hide() 
         
-        # Results styling
         self.results_list.setStyleSheet(f"""
             QListWidget {{ 
                 background-color: {CONFIG['theme']['bg']}; 
@@ -638,23 +617,18 @@ class GlobalSearchBar(EditorOverlayBar):
             self.results_list.setCurrentRow(0)
             self.results_list.show()
             
-            # --- FIX: Scrollbar Policy & Exact Height ---
             
-            # 1. Disable scrollbar if items fit perfectly (<= 6)
             if item_count <= 6:
                 self.results_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             else:
                 self.results_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             
-            # 2. Get exact row height from the list widget itself
             row_height = self.results_list.sizeHintForRow(0)
-            if row_height <= 0: row_height = 36 # Fallback if not yet rendered
-            
-            # 3. Calculate exact visible height
+            if row_height <= 0: row_height = 36 # 
+              
             visible_items = min(item_count, 6)
             list_height = visible_items * row_height
             
-            # 4. Total height = Header (50) + List
             total_height = 50 + list_height
             
             self.animate_height(total_height)
@@ -1075,7 +1049,7 @@ class ExplorerItemWidget(QWidget):
         self.main_window = main_window
         self.clean_text = text
         self.is_dirty = False
-        self.is_new = is_new # Store "is_new" status
+        self.is_new = is_new 
         self.is_active_selection = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 2, 4, 2)
@@ -1100,7 +1074,6 @@ class ExplorerItemWidget(QWidget):
         layout.addWidget(self.btn_rename)
         layout.addWidget(self.btn_close)
           
-        # FIX #7: Use cached icons initially
         default_icon_col = CONFIG['theme']['comment']
         self.btn_rename.setIcon(create_icon("rename_box", default_icon_col, size=24))
         self.btn_close.setIcon(create_icon("x", default_icon_col, size=18))
@@ -1130,7 +1103,6 @@ class ExplorerItemWidget(QWidget):
         icon_col = "#ffffff" if selected else CONFIG['theme']['comment']
         rename_hover = "rgba(0, 0, 0, 0.3)" if selected else "rgba(255, 255, 255, 0.15)"
         
-        # FIX #7: Reuse cached icons
         self.btn_rename.setIcon(create_icon("rename_box", icon_col, size=24))
         self.btn_close.setIcon(create_icon("x", icon_col, size=18))
         
@@ -1363,10 +1335,8 @@ class SettingsDialog(QDialog):
         btn_help.setFixedSize(18, 18)
         btn_help.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        # Standard tooltip (Hover)
         btn_help.setToolTip(text)
         
-        # Force Tooltip on Click
         btn_help.clicked.connect(lambda: QToolTip.showText(QCursor.pos(), text, btn_help))
         
         # --- NEW SUBTLE THEMED STYLE ---
@@ -1489,14 +1459,9 @@ class CommandPalette(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # FIX 1: STRICT CHILD WIDGET FLAGS
-        # We use Qt.WindowType.Widget to ensure it is a normal child, 
-        # NOT a Tool or Popup that the OS window manager tries to manage separately.
-        # FramelessWindowHint keeps it clean.
         self.setWindowFlags(Qt.WindowType.Widget | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # FIX 2: FORCE HIDDEN AT START
         self.hide()
         
         self._geo_anim = QPropertyAnimation(self, b"geometry")
@@ -1587,7 +1552,6 @@ class CommandPalette(QFrame):
         
         self.main_window = parent
         
-        # ... (Commands list remains exactly the same) ...
         self.all_commands = [
             ("New Tab", "Ctrl+T", lambda: self.main_window.create_new_explorer_item(register_undo=True)),
             ("Close Tab", "Ctrl+W", lambda: self.main_window.close_current_tab(register_undo=True)),
@@ -1641,13 +1605,13 @@ class CommandPalette(QFrame):
             new_rect = self.calculate_geometry()
             if self._group.state() != QParallelAnimationGroup.State.Running:
                 self.setGeometry(new_rect)
-            self.raise_() # Ensure it stays on top of editor
+            self.raise_() 
 
     def show_animated(self):
         if time.time() - self.last_close_time > 0.5:
             self.input.clear()
-            self.results.clearSelection() # Changed from setCurrentRow(0)
-            self.results.setCurrentRow(-1) # Ensure nothing is selected
+            self.results.clearSelection() 
+            self.results.setCurrentRow(-1) 
             self.results.scrollToTop()
             
         QApplication.instance().installEventFilter(self)
@@ -1748,7 +1712,6 @@ class CommandPalette(QFrame):
         for name, short, func in self.all_commands:
             if search in name.lower(): self.add_item(name, short, func)
         
-        # FIX: Only auto-select if user has typed something
         if self.results.count() > 0 and text.strip(): 
             self.results.setCurrentRow(0)
         else:
@@ -1778,7 +1741,6 @@ class SearchTriggerButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedWidth(280)
         self.setFixedHeight(32) 
-        # UPDATED STYLESHEET: Using 'background' and ensuring blue border on hover
         self.setStyleSheet(f"""
             QPushButton {{ 
                 background: {CONFIG['theme']['bg']}; 
@@ -1809,7 +1771,6 @@ class SearchTriggerButton(QPushButton):
         self.lbl_text.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-size: 13px; border: none; background: transparent;")
         self.lbl_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         
-        # TEXT ONLY SHORTCUT (NO BADGE)
         self.lbl_shortcut = QLabel("Ctrl+K")
         self.lbl_shortcut.setStyleSheet(f"""
             color: {CONFIG['theme']['comment']}; 
@@ -1834,7 +1795,6 @@ class ModernOverlayButton(QToolButton):
         self.icon_type = icon_type
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(32, 32)
-        # Fix: Remove default styling that might conflict with painting
         self.setStyleSheet("border: none;") 
         self.hovered = False
 
@@ -1850,8 +1810,6 @@ class ModernOverlayButton(QToolButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # FIX: Always draw a semi-transparent background so buttons are visible 
-        # on bright video backgrounds, even when not hovering.
         bg_color = QColor(0, 0, 0, 140) if self.hovered else QColor(0, 0, 0, 60)
         painter.setBrush(bg_color)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1862,7 +1820,6 @@ class ModernOverlayButton(QToolButton):
         else:
             fg_color = QColor(255, 255, 255, 230) 
             
-        # Draw the icon shape
         pen = QPen(fg_color)
         pen.setWidth(2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -1893,11 +1850,9 @@ class ZoomablePreview(QFrame):
         super().__init__(None) 
         self.main_window = main_window_ref
         
-        # 1. Window Flags
         self.default_flags = Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
         self.setWindowFlags(self.default_flags)
         
-        # 2. Transparency & Background
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
         self.setAutoFillBackground(True)
@@ -1930,7 +1885,6 @@ class ZoomablePreview(QFrame):
         self.player.playbackStateChanged.connect(self.check_video_loop)
 
         # --- PAUSE OVERLAY ---
-        # Sibling to video_widget (Child of ZoomablePreview)
         self.pause_overlay = VideoPauseOverlay(self)
         
         # --- Buttons ---
@@ -1967,13 +1921,9 @@ class ZoomablePreview(QFrame):
     def force_overlay_visible(self):
         """Aggressively force the overlay to the top of the stack."""
         if self.is_video and self.pause_overlay.isVisible():
-            # 1. Ensure geometry matches
             self.pause_overlay.setGeometry(self.video_widget.geometry())
-            # 2. Force Raise
             self.pause_overlay.raise_()
-            # 3. Force Video Lower
             self.video_widget.stackUnder(self.pause_overlay)
-            # 4. Force Repaint
             self.pause_overlay.repaint()
 
     def set_content(self, path):
@@ -2006,7 +1956,6 @@ class ZoomablePreview(QFrame):
             self.pause_overlay.setGeometry(self.video_widget.geometry())
         
         self.raise_buttons()
-        # Force overlay update slightly after setup to ensure z-order
         QTimer.singleShot(50, self.force_overlay_visible)
 
     def setup_image_mode(self, path):
@@ -2077,13 +2026,11 @@ class ZoomablePreview(QFrame):
         self.is_magnified = True
         
         if self.is_video:
-             # Manually resize overlay on zoom
              self.pause_overlay.setGeometry(new_x, new_y, new_w, new_h)
 
         event.accept()
 
     def raise_buttons(self):
-        # Stack overlay on top of video
         if self.is_video:
             self.force_overlay_visible()
         
@@ -2131,10 +2078,9 @@ class ZoomablePreview(QFrame):
             self.show()
             self.setFocus()
         
-        # CRITICAL: Re-assert overlay visibility AFTER the fullscreen redraw finishes
         if self.is_video and self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
             QTimer.singleShot(100, self.force_overlay_visible)
-            QTimer.singleShot(300, self.force_overlay_visible) # Safety second check
+            QTimer.singleShot(300, self.force_overlay_visible) 
         
         QTimer.singleShot(50, self.raise_buttons)
 
@@ -2265,7 +2211,6 @@ class ZoomablePreview(QFrame):
 
     def eventFilter(self, source, event):
         if source == self.video_widget:
-            # FIX: Ensure overlay follows video on every move
             if event.type() == QEvent.Type.Move or event.type() == QEvent.Type.Resize:
                 if self.is_video:
                     self.pause_overlay.setGeometry(self.video_widget.geometry())
@@ -2293,20 +2238,16 @@ class NotificationPopup(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         
-        # 1. Main Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10) 
         
-        # 2. The Visible Card
         self.card = QFrame()
         self.card.setObjectName("NotifyCard")
         
-        # Horizontal layout for the card content
         card_layout = QHBoxLayout(self.card)
         card_layout.setContentsMargins(10, 10, 15, 10)
         card_layout.setSpacing(10)
         
-        # 3. The Single Close Button (Left Side)
         self.left_close_btn = QToolButton()
         self.left_close_btn.setFixedSize(26, 26)
         self.left_close_btn.setIconSize(QSize(18, 18))
@@ -2314,18 +2255,15 @@ class NotificationPopup(QWidget):
         self.left_close_btn.setToolTip("Close")
         self.left_close_btn.clicked.connect(self.hide_animated)
         
-        # 4. Text Label
         self.text_label = QLabel()
         self.text_label.setWordWrap(False)
         self.text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         
-        # Add widgets
         card_layout.addWidget(self.left_close_btn)
         card_layout.addWidget(self.text_label, 1)
         
         layout.addWidget(self.card)
         
-        # 5. Drop Shadow
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20)
         shadow.setXOffset(0)
@@ -2333,7 +2271,6 @@ class NotificationPopup(QWidget):
         shadow.setColor(QColor(0, 0, 0, 80))
         self.card.setGraphicsEffect(shadow)
         
-        # 6. Timer & Animation
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.hide_animated)
@@ -2345,11 +2282,9 @@ class NotificationPopup(QWidget):
         if not self.isVisible() or not self.parent(): return
         
         parent_geo = self.parent().geometry()
-        # Calculate target position (Bottom Right) relative to new parent position
         target_x = parent_geo.x() + parent_geo.width() - self.width() - 25
         target_y = parent_geo.y() + parent_geo.height() - self.height() - 35
         
-        # Simply move to the new spot
         self.move(target_x, target_y)
 
     def show_message(self, message, duration=3000, is_error=False):
@@ -2467,10 +2402,8 @@ class NotificationPopup(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # 1. Ensure the Command Palette shortcut is set
         CONFIG["keybinds"]["command_palette"] = "Ctrl+K, Ctrl+Space"
         
-        # 2. Unified Undo Stack
         self.action_stack = [] 
         self.redo_stack = []
         self._is_undoing = False 
@@ -2499,7 +2432,6 @@ class MainWindow(QMainWindow):
         self.addToolBar(self.toolbar)
         
         self.btn_sidebar = QToolButton()
-        # Initial icon (will be fixed by apply_theme)
         self.btn_sidebar.setIcon(colorize_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft), Qt.GlobalColor.white))
         self.btn_sidebar.clicked.connect(self.toggle_sidebar)
         self.toolbar.addWidget(self.btn_sidebar)
@@ -2523,7 +2455,6 @@ class MainWindow(QMainWindow):
         self.btn_menu = QToolButton()
         self.btn_menu.setText("⋮")
         self.btn_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        # Initial style (will be fixed by apply_theme)
         self.btn_menu.setStyleSheet("QToolButton { font-size: 22px; font-weight: bold; padding-bottom: 8px; color: white; } QToolButton::menu-indicator { image: none; }")
         self.main_menu = QMenu(self)
         self.main_menu.setObjectName("ThreeDotMenu")
@@ -2553,11 +2484,9 @@ class MainWindow(QMainWindow):
         lbl_explorer = QLabel("EXPLORER")
         lbl_explorer.setStyleSheet("font-weight: bold; color: #7f849c; font-size: 12px; letter-spacing: 1px; border: none;")
         
-        # FIX: Define btn_new as self.btn_new so apply_theme can find it
         self.btn_new = QToolButton()
         self.btn_new.setText("+")
         self.btn_new.setToolTip("New Tab (Ctrl+T)")
-        # Initial style (will be fixed by apply_theme)
         self.btn_new.setStyleSheet(f"QToolButton {{ color: white; font-weight: bold; font-size: 18px; border: none; background: transparent; border-radius: 4px; padding: 2px; }} QToolButton:hover {{ background: {CONFIG['theme']['selection']}; }} QToolButton:pressed {{ background: {CONFIG['theme']['function']}; color: #1e1e2e; }}")
         self.btn_new.clicked.connect(self.create_new_explorer_item)
         
@@ -2657,7 +2586,6 @@ class MainWindow(QMainWindow):
         self.refresh_shortcuts()
         QTimer.singleShot(0, self.delayed_startup)
         
-        # CRITICAL FIX: Force theme application at startup to override hardcoded white icons
         self.apply_theme()
         
         BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
@@ -2674,7 +2602,6 @@ class MainWindow(QMainWindow):
         
     def perform_auto_snapshot(self):
         
-        # Snapshot the currently active editor content
         if self.current_file_path and os.path.exists(self.current_file_path):
             current_content = self.editor.text()
             self.create_snapshot(self.current_file_path, current_content)
@@ -2683,7 +2610,6 @@ class MainWindow(QMainWindow):
         
 
     def resizeEvent(self, event):
-        # Update floating bars position
         if self.palette.isVisible(): self.palette.update_overlay_position()
 
         self.find_bar.update_position()
@@ -2699,7 +2625,6 @@ class MainWindow(QMainWindow):
     def check_line_for_image(self, line, index):
         """Auto-detects image AND video paths on the current line and shows a zoomable popup preview."""
         
-        # FIX: Removed "if not self.isActiveWindow()" to stop it from closing on Alt+Tab return
         if not self.isVisible():
             if hasattr(self, 'image_preview') and self.image_preview.isVisible() and not self.image_preview.is_fullscreen:
                 self.image_preview.hide()
@@ -2709,8 +2634,7 @@ class MainWindow(QMainWindow):
         if not text:
             self.image_preview.hide_preview()
             return
-
-        # 1. Extract path
+          
         match = re.search(r'!\[.*?\]\((.*?)\)', text)
         clean_path = match.group(1) if match else None
         
@@ -2723,7 +2647,6 @@ class MainWindow(QMainWindow):
             self.image_preview.hide_preview()
             return
 
-        # 2. Check Extension
         valid_exts = [
             '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', 
             '.mp4', '.webm', '.mkv', '.avi', '.mov'
@@ -2732,7 +2655,6 @@ class MainWindow(QMainWindow):
             self.image_preview.hide_preview()
             return
 
-        # 3. Resolve path
         potential_paths = []
         potential_paths.append(clean_path) 
         if self.current_file_path:
@@ -2771,17 +2693,14 @@ class MainWindow(QMainWindow):
     def apply_theme(self):
         theme = CONFIG['theme']
         
-        # 1. Detect Light vs Dark Theme
-        # We calculate brightness (Luma). If > 128, it's a light theme.
+
         bg_col = QColor(theme['bg'])
         brightness = (bg_col.red() * 0.299 + bg_col.green() * 0.587 + bg_col.blue() * 0.114)
         is_light_theme = brightness > 128
         
-        # Determine contrast colors
         icon_color_qt = Qt.GlobalColor.black if is_light_theme else Qt.GlobalColor.white
         icon_css_color = "black" if is_light_theme else "white"
         
-        # 2. Update Global Styles
         self.setStyleSheet(f"""
             QMainWindow {{ background-color: {theme['bg']}; }}
             QLabel {{ color: {theme['fg']}; }}
@@ -2812,16 +2731,13 @@ class MainWindow(QMainWindow):
             {SCROLLBAR_CSS.replace(CONFIG['theme']['sidebar'], theme['sidebar']).replace(CONFIG['theme']['selection'], theme['selection']).replace(CONFIG['theme']['function'], theme['function'])}
         """)
 
-        # 3. Update Containers
         self.sidebar_container.setStyleSheet(f"background-color: {theme['sidebar']}; border-right: 1px solid {theme['selection']};")
         self.top_bar.setStyleSheet(f"#TopBar {{ background: {theme['bg']}; border-bottom: 2px solid {theme['function']}; }}")
 
-        # 4. FIX: Sidebar Toggle Arrow Color
         width = self.sidebar_container.width()
         arrow_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight if width > 0 else QStyle.StandardPixmap.SP_ArrowLeft)
         self.btn_sidebar.setIcon(colorize_icon(arrow_icon, icon_color_qt))
         
-        # 5. FIX: 3-Dot Menu Button Color
         self.btn_menu.setStyleSheet(f"""
             QToolButton {{ 
                 font-size: 22px; 
@@ -2832,7 +2748,6 @@ class MainWindow(QMainWindow):
             QToolButton::menu-indicator {{ image: none; }}
         """)
         
-        # 6. FIX: Sidebar "+" (New Tab) Button Color
         if hasattr(self, 'btn_new'):
             self.btn_new.setStyleSheet(f"""
                 QToolButton {{ 
@@ -2848,16 +2763,14 @@ class MainWindow(QMainWindow):
                 QToolButton:pressed {{ background: {theme['function']}; color: {theme['bg']}; }}
             """)
 
-        # 7. Breadcrumbs & Top Bar Icons
         self.breadcrumbs.setStyleSheet(f"color: {theme['comment']}; padding: 10px; font-family: Consolas; font-size: 12px; border: none;")
         
-        # Use a contrasting color for the Close/GoTop buttons
-        # In light mode, comment color might be too light, so use FG or specific dark grey
+
         btn_icon_col = theme['comment'] if not is_light_theme else "#555555"
         self.btn_go_top.setIcon(create_icon("arrow_up", btn_icon_col, size=16))
         self.btn_close_tab_main.setIcon(create_icon("x", btn_icon_col, size=16))
 
-        # 8. Update File List (Explorer)
+
         self.file_list.setStyleSheet(f"""
             QListWidget {{ background: transparent; color: {theme['fg']}; border: none; padding: 10px 0px; outline: none; }} 
             QListWidget::item {{ padding: 2px; border-radius: 6px; margin: 2px 10px; border: none; color: {theme['fg']}; }} 
@@ -2871,12 +2784,10 @@ class MainWindow(QMainWindow):
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
         """)
 
-        # 9. Update Status Bar
         self.status_bar.setStyleSheet(f"color: {theme['function']}; font-size: 12px; border: none;")
         self.encoding_label.setStyleSheet(f"color: {theme['comment']}; font-size: 12px; border: none;")
         self.status_bar.parent().setStyleSheet(f"background: {theme['sidebar']}; border-top: 1px solid {theme['selection']};")
 
-        # 10. Update Search Trigger Button
         self.search_trigger.setStyleSheet(f"""
             QPushButton {{ 
                 background: {theme['bg']}; 
@@ -2893,7 +2804,6 @@ class MainWindow(QMainWindow):
         self.search_trigger.lbl_icon.setPixmap(create_icon("search", theme['comment'], size=14).pixmap(14, 14))
         self.search_trigger.lbl_text.setStyleSheet(f"color: {theme['comment']}; font-size: 13px; border: none; background: transparent;")
         
-        # 11. Update Components & Editor
         self.find_bar.update_theme()
         self.goto_bar.update_theme()
         self.palette.update_theme()
@@ -2940,7 +2850,6 @@ class MainWindow(QMainWindow):
             self.global_search_bar.show_animated()
 
     def open_file_at_line(self, filename, line_index):
-        # Find tab with this filename or open it
         target_item = None
         for i in range(self.file_list.count()):
             item = self.file_list.item(i)
@@ -2949,7 +2858,6 @@ class MainWindow(QMainWindow):
                 break
         
         if not target_item:
-            # Should not happen since we search open files, but safety check
             return
 
         self.file_list.setCurrentItem(target_item)
@@ -2994,19 +2902,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'find_bar') and hasattr(self, 'goto_bar'):
             act_find = QAction("Find Text", self)
             act_find.setShortcut("Ctrl+F")
-            # Connect to new helper methods that handle mutual exclusion
             act_find.triggered.connect(self.open_find_bar)
             self.addAction(act_find)  
             self._window_actions.append(act_find)
-            # m.addAction(act_find) <--- REMOVED FROM MENU
 
             act_goto = QAction("Go to Line", self)
             act_goto.setShortcut("Ctrl+G")
-            # Connect to new helper methods that handle mutual exclusion
             act_goto.triggered.connect(self.open_goto_bar)
             self.addAction(act_goto)
             self._window_actions.append(act_goto)
-            # m.addAction(act_goto) <--- REMOVED FROM MENU
 
         # --- GLOBAL SEARCH (New) ---
         act_global = QAction("Global Find", self)
@@ -3014,7 +2918,6 @@ class MainWindow(QMainWindow):
         act_global.triggered.connect(self.open_global_search)
         self.addAction(act_global)
         self._window_actions.append(act_global)
-        # m.addAction(act_global) # Optional: Add to menu if you want
 
         # --- COPY PATH HOTKEY ---
         act_copy_path = QAction("Copy File Path", self)
@@ -3060,8 +2963,6 @@ class MainWindow(QMainWindow):
                 item = self.add_sidebar_item(fname)
                 self.file_list.setCurrentItem(item)
 
-    # In MainWindow class...
-
     def save_file(self):
         item = self.file_list.currentItem()
         if not item: return
@@ -3083,7 +2984,6 @@ class MainWindow(QMainWindow):
                 
                 self.notify(f"Saved {os.path.basename(name)}")
                 
-                # CHECK SETTING BEFORE CREATING SNAPSHOT
                 if CONFIG.get("behavior", {}).get("enable_local_history", True):
                     self.create_snapshot(name, content)
 
@@ -3092,7 +2992,6 @@ class MainWindow(QMainWindow):
         else: self.save_as()
 
     def perform_auto_snapshot(self):
-        # CHECK SETTING BEFORE RUNNING AUTO-SNAPSHOT
         if not CONFIG.get("behavior", {}).get("enable_local_history", True):
             return
 
@@ -3148,12 +3047,9 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
             if not self.isActiveWindow():
-                # App lost focus
                 if hasattr(self, 'palette'): 
                     self.palette.hide_animated()
                 
-                # Hide preview ONLY if it's a popup. 
-                # If fullscreen, it's a child widget, so it stays.
                 if hasattr(self, 'image_preview') and self.image_preview.isVisible():
                     if not self.image_preview.is_fullscreen:
                         self.image_preview.hide_preview()
@@ -3164,7 +3060,6 @@ class MainWindow(QMainWindow):
         self.status_bar.setText(f" Agent Suggestion: [Tab] {text}")
 
     def closeEvent(self, event):
-        # Force the preview window to close when the app closes
         if hasattr(self, 'image_preview'):
             self.image_preview.close()
             self.image_preview.deleteLater()
@@ -3233,17 +3128,15 @@ class MainWindow(QMainWindow):
             self.last_active_filename = curr_name
             self.breadcrumbs.setText(f"  {curr_name}  ")
             
-            # FIX #3 & #6: Use Try/Except AND Threading for loading
             if curr_name not in self.file_states:
                 if os.path.exists(curr_name):
-                    self.editor.setDisabled(True) # Disable while loading
+                    self.editor.setDisabled(True) 
                     enc = CONFIG["editor"].get("encoding", "utf-8")
                     self.loader = FileLoadWorker(curr_name, enc)
                     self.loader.finished_loading.connect(self.on_file_loaded)
                     self.loader.start()
-                    return # Exit here, let thread finish
+                    return 
                 else:
-                    # File doesn't exist (deleted?), init empty
                     self.file_states[curr_name] = ""
                     self.current_file_path = None
             
@@ -3258,30 +3151,24 @@ class MainWindow(QMainWindow):
         if not filepath or not content: return
 
         try:
-            # 1. Determine History Folder
             file_dir = os.path.dirname(filepath)
             history_dir = os.path.join(file_dir, ".zenith_history")
             
             if not os.path.exists(history_dir):
                 os.makedirs(history_dir)
-                # On Windows, try to hide the folder
                 if os.name == 'nt':
                     import ctypes
                     ctypes.windll.kernel32.SetFileAttributesW(history_dir, 2)
 
-            # 2. Generate Timestamped Filename
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             filename = os.path.basename(filepath)
             backup_name = f"{filename}_{timestamp}.bak"
             backup_path = os.path.join(history_dir, backup_name)
 
-            # 3. Write Snapshot
             enc = CONFIG["editor"].get("encoding", "utf-8")
             with open(backup_path, 'w', encoding=enc) as f:
                 f.write(content)
-            
-            # Optional: Clean up old history (keep last 50 snapshots per folder)
-            # self.cleanup_history(history_dir)
+
             
         except Exception as e:
             print(f"Time Machine Error: {e}")
@@ -3293,7 +3180,6 @@ class MainWindow(QMainWindow):
             self.saved_content[name] = content
             self.current_file_path = name
         else:
-            # FIX #3: Handle load failure gracefully
             QMessageBox.critical(self, "Error", f"Could not read file: {content}")
             self.file_states[name] = ""
             
@@ -3309,18 +3195,15 @@ class MainWindow(QMainWindow):
         self.is_switching_internal = False
         self.apply_editor_fixes()
         
-        # --- FIXED: UPDATE GOTO BAR LIMITS ON TAB SWITCH ---
         if hasattr(self, 'goto_bar') and self.goto_bar.isVisible():
             self.goto_bar.update_limits_if_needed()
 
     def on_editor_text_changed(self, text):
         if self.is_switching_internal: return
         
-        # Record editor activity for Undo System
         if CONFIG.get("behavior", {}).get("enable_command_undo", False):
             self.record_editor_action()
 
-        # Update Dirty Indicator ("*") in sidebar
         item = self.file_list.currentItem()
         if item:
             widget = self.file_list.itemWidget(item)
@@ -3328,9 +3211,6 @@ class MainWindow(QMainWindow):
             if isinstance(widget, ExplorerItemWidget):
                 if widget.is_dirty != is_dirty:
                     widget.set_dirty(is_dirty)
-
-        # --- FIX: Live Image Update ---
-        # Immediate check when text changes to hide/show preview instantly
         try:
             line, idx = self.editor.getCursorPosition()
             self.check_line_for_image(line, idx)
@@ -3343,8 +3223,7 @@ class MainWindow(QMainWindow):
         self.file_list.addItem(item)
         self.file_list.setItemWidget(item, ExplorerItemWidget(name, item, self, is_new))
         return item
-
-    # --- UNIFIED PRIORITY UNDO SYSTEM ---
+      
     def register_command_action(self, undo_func, redo_func):
         """Pushes a Command action onto the unified stack."""
         self.action_stack.append(('cmd', undo_func, redo_func))
@@ -3353,7 +3232,7 @@ class MainWindow(QMainWindow):
     def record_editor_action(self):
         """Marks the top of the stack as an editor session."""
         if self._is_undoing: return
-        # If top is already 'editor', do nothing (grouping implicitly)
+
         if not self.action_stack or self.action_stack[-1][0] != 'editor':
             self.action_stack.append(['editor', 1])
             self.redo_stack.clear()
@@ -3368,10 +3247,8 @@ class MainWindow(QMainWindow):
         action_type = top_item[0]
 
         if action_type == 'editor':
-            # Undo in Scintilla
             self.editor.undo()
             
-            # FIX: Use isUndoAvailable() instead of canUndo()
             if not self.editor.isUndoAvailable():
                 self.action_stack.pop()
                 
@@ -3384,7 +3261,6 @@ class MainWindow(QMainWindow):
         self._is_undoing = False
 
     def global_redo(self):
-        # Redo logic for commands 
         if self.redo_stack:
             item = self.redo_stack.pop()
             if item[0] == 'cmd':
@@ -3417,7 +3293,6 @@ class MainWindow(QMainWindow):
         if name:
             new_name = name
         else:
-            # FIX #9: Logic for filling gap in Untitled numbers
             existing_untitled = []
             for k in self.file_states.keys():
                 match = re.match(r"Untitled (\d+)\.txt", k)
@@ -3442,7 +3317,6 @@ class MainWindow(QMainWindow):
         self.editor.setFocus()
         self.editor.set_lexer_from_filename(new_name)
         
-        # FIX #1: Use setModified(False) instead of setSavePoint
         self.editor.setModified(False) 
         
         self.apply_editor_fixes()
@@ -3486,7 +3360,6 @@ class MainWindow(QMainWindow):
         old_name = self.get_widget_text(item)
         new_name, ok = QInputDialog.getText(self, "Rename Tab", "Enter new name:", text=old_name)
         if ok and new_name and new_name != old_name:
-            # FIX #4: Check internal states AND filesystem
             if new_name in self.file_states or os.path.exists(new_name):
                 QMessageBox.warning(self, "Error", f"The file '{new_name}' already exists.")
                 return
@@ -3522,7 +3395,6 @@ class MainWindow(QMainWindow):
             )
 
     def moveEvent(self, event):
-        # Update command palette position
         if self.palette.isVisible(): 
             self.palette.update_overlay_position()
             
@@ -3530,3 +3402,4 @@ class MainWindow(QMainWindow):
             self.notification_popup.update_position()
             
         super().moveEvent(event)
+
