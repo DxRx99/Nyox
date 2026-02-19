@@ -118,7 +118,6 @@ def get_scrollbar_css(bg, sel, func):
 
 def load_config():
     """Loads config from JSON file with safe merging."""
-    # 1. Start with a pristine deep copy of defaults
     final_config = copy.deepcopy(DEFAULT_CONFIG)
     
     saved_config = {}
@@ -130,31 +129,23 @@ def load_config():
             print(f"Failed to load config file: {e}")
             saved_config = {}
 
-    # 2. Recursive Merge Strategy
-    # This ensures we keep user settings but add any new keys from defaults
     for section, default_val in DEFAULT_CONFIG.items():
         if section not in saved_config:
-            continue # Use the default we already set in final_config
+            continue 
         
         user_val = saved_config[section]
         
         if isinstance(default_val, dict) and isinstance(user_val, dict):
-            # Update dictionary keys individually
             for key, val in user_val.items():
                 final_config[section][key] = val
         else:
-            # Direct value update (strings, bools)
             final_config[section] = user_val
 
-    # 3. ENFORCE THEME PALETTE
-    # This is the critical fix. We trust the 'theme_name' and reload the palette 
-    # from source to ensure colors are correct (and not stale or broken).
     theme_name = final_config.get("app", {}).get("theme_name", "Default Dark")
     
     if theme_name in THEME_PALETTES:
         final_config["theme"] = THEME_PALETTES[theme_name].copy()
     else:
-        # Fallback if theme name is invalid
         final_config["app"]["theme_name"] = "Default Dark"
         final_config["theme"] = THEME_PALETTES["Default Dark"].copy()
         
@@ -165,15 +156,14 @@ def save_config():
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(CONFIG, f, indent=4)
-            f.flush() # Ensure it hits the disk
+            f.flush() 
             os.fsync(f.fileno())
     except Exception as e:
         print(f"Failed to save config: {e}")
 
-# Load immediately on module import
 CONFIG = load_config()
 
-# Helper styles based on loaded config
 STYLES = {
     "scrollbar": get_scrollbar_css(CONFIG['theme']['sidebar'], CONFIG['theme']['selection'], CONFIG['theme']['function'])
 }
+
