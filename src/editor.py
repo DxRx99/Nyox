@@ -1,8 +1,11 @@
 import os
 import re
-from PyQt6.QtGui import QColor, QFont, QKeySequence
-from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt, QTimer
+import sys
+import unicodedata
+import ctypes
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QTextOption, QPainter, QPaintEvent, QWheelEvent
+from PyQt6.QtWidgets import QApplication, QPlainTextEdit, QWidget
+from PyQt6.QtCore import Qt, QTimer, QRect, QSize, QEasingCurve, QPropertyAnimation
 from PyQt6.Qsci import (QsciScintilla, QsciLexerPython, QsciLexerHTML, 
                         QsciLexerJSON, QsciLexerCSS, QsciLexerMarkdown, 
                         QsciLexerBash, QsciLexerCPP, QsciLexerJavaScript, QsciAPIs)
@@ -16,6 +19,7 @@ except ImportError:
 
 from .core import BUS, CONFIG
 
+# Dynamic Lexer Mapping
 LEXER_MAP = {
     '.html': QsciLexerHTML, '.xml': QsciLexerHTML, '.php': QsciLexerHTML,
     '.json': QsciLexerJSON,
@@ -27,11 +31,180 @@ LEXER_MAP = {
     '.py': QsciLexerPython, '.pyw': QsciLexerPython
 }
 
+# Arabic = 0x01, Hebrew = 0x0D, Farsi/Persian = 0x29, Urdu = 0x20, Syriac = 0x5A
+RTL_LANG_IDS = {0x01, 0x0D, 0x29, 0x20, 0x5A}
+
+
+class _RTLLineNumberArea(QWidget):
+    """Line number gutter for the RTL overlay, displayed on the right side."""
+    def __init__(self, editor):
+        super().__init__(editor)
+        self._editor = editor
+    
+    def sizeHint(self):
+        return QSize(self._editor.line_number_area_width(), 0)
+    
+    def paintEvent(self, event):
+        self._editor.line_number_area_paint(event)
+
+
+class RTLPlainTextEdit(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.setWordWrapMode(QTextOption.WrapMode.NoWrap)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._show_line_numbers = True
+        self._zoom_size = 12
+        
+        opt = QTextOption()
+        opt.setAlignment(Qt.AlignmentFlag.AlignLeading)
+        opt.setTextDirection(Qt.LayoutDirection.RightToLeft)
+        opt.setWrapMode(QTextOption.WrapMode.NoWrap)
+        self.document().setDefaultTextOption(opt)
+        
+        self._line_number_area = _RTLLineNumberArea(self)
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self._update_line_number_area_width()
+        
+        self._scroll_animation = QPropertyAnimation(self.verticalScrollBar(), b"value")
+        self._scroll_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll_animation.setDuration(300)
+        self._target_scroll_value = 0
+        
+        self.textChanged.connect(self._scroll_to_cursor_rtl)
+    
+    # --- Line numbers (RIGHT side) ---
+    
+    def set_show_line_numbers(self, show):
+        """Toggle line number visibility."""
+        self._show_line_numbers = show
+        self._line_number_area.setVisible(show)
+        self._update_line_number_area_width()
+    
+    def line_number_area_width(self):
+        if not self._show_line_numbers:
+            return 0
+        digits = max(1, len(str(self.blockCount())))
+        return 10 + self.fontMetrics().horizontalAdvance('9') * digits + 10
+    
+    def _update_line_number_area_width(self, _=0):
+        w = self.line_number_area_width()
+        self.setViewportMargins(w, 0, 0, 0)
+    
+    def _update_line_number_area(self, rect, dy):
+        if not self._show_line_numbers:
+            return
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(0, rect.y(), self._line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width()
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._show_line_numbers:
+            return
+        cr = self.contentsRect()
+        w = self.line_number_area_width()
+        self._line_number_area.setGeometry(QRect(cr.left(), cr.top(), w, cr.height()))
+    
+    def _sync_line_number_font(self):
+        """Update line number area font to match the main editor font."""
+        self._line_number_area.setFont(self.font())
+    
+    def line_number_area_paint(self, event):
+        if not self._show_line_numbers:
+            return
+        theme = CONFIG["theme"]
+        painter = QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), QColor(theme["sidebar"]))
+        painter.setFont(self.font())
+        painter.setPen(QColor(theme["comment"]))
+        
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + round(self.blockBoundingRect(block).height())
+        
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                painter.drawText(
+                    5, top, self._line_number_area.width() - 10, 
+                    self.fontMetrics().height(),
+                    Qt.AlignmentFlag.AlignCenter, number
+                )
+            block = block.next()
+            top = bottom
+            bottom = top + round(self.blockBoundingRect(block).height())
+            block_number += 1
+        painter.end()
+    
+    # --- Zoom + Scroll ---
+    
+    def wheelEvent(self, event):
+        """Handle Ctrl+Scroll to zoom, otherwise smooth scroll."""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            self._zoom_size += (1 if delta > 0 else -1)
+            self._zoom_size = max(6, min(72, self._zoom_size))
+            font = self.font()
+            font.setPixelSize(self._zoom_size)
+            self.setFont(font)
+            self._sync_line_number_font()
+            self._update_line_number_area_width()
+            if self._show_line_numbers:
+                cr = self.contentsRect()
+                w = self.line_number_area_width()
+                self._line_number_area.setGeometry(QRect(cr.left(), cr.top(), w, cr.height()))
+                self._line_number_area.update()
+            
+            parent_editor = self.parent()
+            if parent_editor and hasattr(parent_editor, 'zoomTo'):
+                default_size = max(10, CONFIG["editor"].get("font_size", 12))
+                zoom_delta = self._zoom_size - default_size
+                parent_editor.zoomTo(zoom_delta)
+            event.accept()
+            return
+        
+        delta = event.angleDelta().y()
+        if delta != 0:
+            sb = self.verticalScrollBar()
+            if self._scroll_animation.state() == QPropertyAnimation.State.Running:
+                current = self._target_scroll_value
+            else:
+                current = sb.value()
+            
+            step = int(delta * 0.8)
+            self._target_scroll_value = max(sb.minimum(), min(sb.maximum(), current - step))
+            
+            self._scroll_animation.stop()
+            self._scroll_animation.setStartValue(sb.value())
+            self._scroll_animation.setEndValue(self._target_scroll_value)
+            self._scroll_animation.start()
+            event.accept()
+            return
+        
+        super().wheelEvent(event)
+    
+    def _scroll_to_cursor_rtl(self):
+        """Auto-scroll to keep cursor visible."""
+        QTimer.singleShot(0, self._do_rtl_scroll)
+    
+    def _do_rtl_scroll(self):
+        """Let Qt handle cursor tracking natively with RTL scrollbar."""
+        self.ensureCursorVisible()
+
 class ZenithEditor(QsciScintilla):
     SPELLCHECK_INDICATOR = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         
         # --- CORE ENGINE SETTINGS ---
         self.setUtf8(True)
@@ -49,10 +222,11 @@ class ZenithEditor(QsciScintilla):
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('F') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('G') | (QsciScintilla.SCMOD_CTRL << 16))
 
-        # --- PERFORMANCE ---
-        self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 0)
-        self.SendScintilla(QsciScintilla.SCI_SETSCROLLWIDTHTRACKING, 1) 
-        
+        # --- HORIZONTAL SCROLLBAR ---
+        self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 1) 
+        self.SendScintilla(QsciScintilla.SCI_SETSCROLLWIDTH, 1)
+        self.SendScintilla(QsciScintilla.SCI_SETSCROLLWIDTHTRACKING, 1)
+
         self.current_lexer = None
         
         # --- SPELLCHECK SETUP ---
@@ -84,10 +258,22 @@ class ZenithEditor(QsciScintilla):
 
         self.setBraceMatching(QsciScintilla.BraceMatch.SloppyBraceMatch)
         
+        # Signals
         self.textChanged.connect(self.emit_change)
         if HAS_SPELLCHECK:
             self.textChanged.connect(self.trigger_spellcheck)
         self.linesChanged.connect(self.update_margin_width)
+        self.textChanged.connect(self._detect_text_direction)
+        
+        # Track current layout direction
+        self._is_rtl = False
+        
+        # --- RTL OVERLAY (Qt's native BiDi text engine) ---
+        self._rtl_overlay = RTLPlainTextEdit(self)
+        self._rtl_overlay.hide()
+        self._syncing = False  # Prevent sync loops
+        self._rtl_overlay.textChanged.connect(self._on_rtl_overlay_changed)
+        self._update_rtl_overlay_style()
 
     # --- DRAG & DROP SUPPORT (FIXED FOR VIDEOS) ---
     def dragEnterEvent(self, event):
@@ -122,6 +308,11 @@ class ZenithEditor(QsciScintilla):
         super().dropEvent(event)
 
     def keyPressEvent(self, event):
+        self._check_keyboard_layout()
+        
+        if self._is_rtl and self._rtl_overlay.isVisible():
+            return  
+        
         if event.matches(QKeySequence.StandardKey.Paste):
             clipboard = QApplication.clipboard()
             mime_data = clipboard.mimeData()
@@ -137,7 +328,7 @@ class ZenithEditor(QsciScintilla):
                         import os
                         filename = os.path.basename(file_path)
                         self.insert(f'![{filename}]({file_path})')
-                        return # Handled custom paste
+                        return
 
         if event.key() == Qt.Key.Key_T and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             win = self.window()
@@ -214,6 +405,7 @@ class ZenithEditor(QsciScintilla):
 
     def emit_change(self):
         BUS.editor_text_changed.emit("changed")
+        self.SendScintilla(QsciScintilla.SCI_SETSCROLLWIDTH, 1)
 
     def update_margin_width(self):
         if not CONFIG["editor"]["show_line_numbers"]:
@@ -253,6 +445,142 @@ class ZenithEditor(QsciScintilla):
         self.setCallTipsBackgroundColor(QColor(theme["sidebar"]))
         self.setCallTipsForegroundColor(QColor(theme["fg"]))
         self.update_margin_width()
+        
+        if hasattr(self, '_rtl_overlay'):
+            self._update_rtl_overlay_style()
+
+    def _check_keyboard_layout(self):
+        """Detect the current Windows keyboard layout and switch to RTL if needed."""
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            thread_id = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)
+            layout_id = ctypes.windll.user32.GetKeyboardLayout(thread_id)
+            lang_id = layout_id & 0xFF
+            is_rtl_keyboard = lang_id in RTL_LANG_IDS
+            
+            if is_rtl_keyboard and not self._is_rtl:
+                self._activate_rtl_overlay()
+            elif not is_rtl_keyboard and self._is_rtl:
+                self._deactivate_rtl_overlay()
+        except Exception:
+            pass
+    
+    def _update_rtl_overlay_style(self):
+        """Style the RTL overlay to match the editor theme."""
+        theme = CONFIG["theme"]
+        safe_size = max(10, CONFIG["editor"].get("font_size", 12))
+        font_family = CONFIG["editor"].get("font_family", "Consolas")
+        self._rtl_overlay.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {theme['bg']};
+                color: {theme['fg']};
+                border: none;
+                selection-background-color: {theme['selection']};
+            }}
+        """)
+        font = QFont(font_family, safe_size)
+        font.setPixelSize(safe_size)
+        self._rtl_overlay.setFont(font)
+        self._rtl_overlay._zoom_size = safe_size
+        show_lines = CONFIG["editor"].get("show_line_numbers", True)
+        self._rtl_overlay.set_show_line_numbers(show_lines)
+    
+    def _activate_rtl_overlay(self):
+        """Switch to RTL mode: show Qt overlay on top of Scintilla."""
+        self._is_rtl = True
+        self._update_rtl_overlay_style()
+        current_zoom = self.SendScintilla(QsciScintilla.SCI_GETZOOM)
+        base_size = max(10, CONFIG["editor"].get("font_size", 12))
+        synced_size = max(6, base_size + current_zoom)
+        font = self._rtl_overlay.font()
+        font.setPixelSize(synced_size)
+        self._rtl_overlay.setFont(font)
+        self._rtl_overlay._zoom_size = synced_size
+        self._syncing = True
+        self._rtl_overlay.setPlainText(self.text())
+        self._syncing = False
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setMarginWidth(0, 0)
+        self._rtl_overlay.setGeometry(0, 0, self.width(), self.height())
+        self._rtl_overlay.show()
+        self._rtl_overlay.setFocus()
+        cursor = self._rtl_overlay.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._rtl_overlay.setTextCursor(cursor)
+    
+    def _deactivate_rtl_overlay(self):
+        """Switch back to LTR mode: sync text back and hide overlay."""
+        self._is_rtl = False
+        base_size = max(10, CONFIG["editor"].get("font_size", 12))
+        zoom_delta = self._rtl_overlay._zoom_size - base_size
+        self.zoomTo(zoom_delta)
+        self._syncing = True
+        overlay_text = self._rtl_overlay.toPlainText()
+        self.setText(overlay_text)
+        self._syncing = False
+        self._rtl_overlay.hide()
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.update_margin_width()
+        self.setFocus()
+        self.SendScintilla(QsciScintilla.SCI_DOCUMENTEND)
+    
+    def _on_rtl_overlay_changed(self):
+        """Sync RTL overlay text back to Scintilla buffer (for save/status)."""
+        if self._syncing:
+            return
+        self._syncing = True
+        self.setText(self._rtl_overlay.toPlainText())
+        self._syncing = False
+    
+    def resizeEvent(self, event):
+        """Keep RTL overlay sized correctly."""
+        super().resizeEvent(event)
+        if self._rtl_overlay.isVisible():
+            self._rtl_overlay.setGeometry(0, 0, self.width(), self.height())
+    
+    def _apply_rtl_layout(self):
+        """Switch to RTL: mirror layout, move line numbers to right, scroll to caret."""
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.SendScintilla(QsciScintilla.SCI_SETXOFFSET, 0)
+        self.SendScintilla(QsciScintilla.SCI_SCROLLCARET)
+        self.SendScintilla(QsciScintilla.SCI_COLOURISE, 0, -1)
+        if hasattr(self, 'viewport'):
+            self.viewport().update()
+    
+    def _apply_ltr_layout(self):
+        """Switch to LTR: reset layout to default, scroll to caret."""
+        self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.SendScintilla(QsciScintilla.SCI_SETXOFFSET, 0)
+        self.SendScintilla(QsciScintilla.SCI_SCROLLCARET)
+        self.SendScintilla(QsciScintilla.SCI_COLOURISE, 0, -1)
+        if hasattr(self, 'viewport'):
+            self.viewport().update()
+    
+    def _detect_text_direction(self):
+        """Detect if the current text is predominantly RTL and activate overlay."""
+        if self._syncing:
+            return
+        text = self.text()
+        if not text:
+            if self._is_rtl:
+                self._deactivate_rtl_overlay()
+            return
+        sample = text[:200]
+        rtl_count = 0
+        ltr_count = 0
+        for ch in sample:
+            bidi = unicodedata.bidirectional(ch)
+            if bidi in ('R', 'AL', 'AN'):
+                rtl_count += 1
+            elif bidi == 'L':
+                ltr_count += 1
+        is_rtl = rtl_count > ltr_count and rtl_count > 0
+        if is_rtl and not self._is_rtl:
+            self._activate_rtl_overlay()
+        elif not is_rtl and self._is_rtl:
+            self._deactivate_rtl_overlay()
 
     def trigger_spellcheck(self):
         self.spell_timer.start()
@@ -277,4 +605,3 @@ class ZenithEditor(QsciScintilla):
                     self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, self.SPELLCHECK_INDICATOR)
                     self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE, start_byte, length_byte)
             except: pass
-
