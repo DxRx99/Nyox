@@ -3,9 +3,9 @@ import re
 import sys
 import unicodedata
 import ctypes
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QTextOption, QPainter, QPaintEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication, QPlainTextEdit, QWidget
-from PyQt6.QtCore import Qt, QTimer, QRect, QSize, QEasingCurve, QPropertyAnimation
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QTextOption, QPainter, QPaintEvent, QWheelEvent, QPen, QPolygon
+from PyQt6.QtWidgets import QApplication, QPlainTextEdit, QWidget, QTimeEdit
+from PyQt6.QtCore import Qt, QTimer, QRect, QSize, QEasingCurve, QPropertyAnimation, QPoint
 from PyQt6.Qsci import (QsciScintilla, QsciLexerPython, QsciLexerHTML, 
                         QsciLexerJSON, QsciLexerCSS, QsciLexerMarkdown, 
                         QsciLexerBash, QsciLexerCPP, QsciLexerJavaScript, QsciAPIs)
@@ -18,6 +18,111 @@ except ImportError:
     print("Warning: pyspellchecker not found.")
 
 from .core import BUS, CONFIG
+
+class ThemedTimeEdit(QTimeEdit):
+    """QTimeEdit with manually painted ▲/▼ arrows that are always visible
+    and route clicks to stepUp/stepDown."""
+    BTN_W = 22
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hovered_half = None
+        self.setMouseTracking(True)
+        self._apply_style()
+
+    def _apply_style(self):
+        t   = CONFIG.get("theme", {})
+        bg  = t.get("sidebar",   "#181825")
+        fg  = t.get("fg",        "#cdd6f4")
+        sel = t.get("selection", "#313244")
+        acc = t.get("function",  "#89b4fa")
+        self.setStyleSheet(f"""
+            QTimeEdit {{
+                background-color: {bg};
+                color: {fg};
+                border: 1px solid {sel};
+                border-radius: 4px;
+                padding: 4px {self.BTN_W + 6}px 4px 8px;
+                min-height: 24px;
+            }}
+            QTimeEdit:focus {{ border-color: {acc}; }}
+            QTimeEdit::up-button   {{ width: 0px; border: none; }}
+            QTimeEdit::down-button {{ width: 0px; border: none; }}
+        """)
+
+    def _btn_rect(self):
+        return self.width() - self.BTN_W, self.height() // 2
+
+    def _half_at(self, pos):
+        bx, mid = self._btn_rect()
+        if pos.x() >= bx:
+            return 'up' if pos.y() < mid else 'down'
+        return None
+
+    def mousePressEvent(self, event):
+        half = self._half_at(event.pos())
+        if half == 'up':
+            self.stepUp(); event.accept()
+        elif half == 'down':
+            self.stepDown(); event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        half = self._half_at(event.pos())
+        if half != self._hovered_half:
+            self._hovered_half = half
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered_half = None
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        t   = CONFIG.get("theme", {})
+        fg  = QColor(t.get("fg",        "#cdd6f4"))
+        sel = QColor(t.get("selection", "#313244"))
+        acc = QColor(t.get("function",  "#89b4fa"))
+        brd = QColor(t.get("comment",   "#6c7086"))
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h   = self.width(), self.height()
+        bx, mid = self._btn_rect()
+
+        up_bg = acc if self._hovered_half == 'up'   else sel
+        dn_bg = acc if self._hovered_half == 'down' else sel
+        up_fg = QColor(t.get("bg", "#1e1e2e")) if self._hovered_half == 'up'   else fg
+        dn_fg = QColor(t.get("bg", "#1e1e2e")) if self._hovered_half == 'down' else fg
+
+        p.setPen(QPen(brd, 1))
+        p.setBrush(up_bg)
+        p.drawRect(bx, 1, self.BTN_W - 2, mid - 2)
+        p.setBrush(dn_bg)
+        p.drawRect(bx, mid, self.BTN_W - 2, h - mid - 2)
+
+        cx, tw, th = bx + self.BTN_W // 2, 7, 4
+        p.setPen(Qt.PenStyle.NoPen)
+
+        p.setBrush(up_fg)
+        up_cy = mid // 2
+        p.drawPolygon(QPolygon([
+            QPoint(cx, up_cy - th // 2),
+            QPoint(cx + tw // 2, up_cy + th // 2),
+            QPoint(cx - tw // 2, up_cy + th // 2),
+        ]))
+
+        p.setBrush(dn_fg)
+        dn_cy = mid + (h - mid) // 2
+        p.drawPolygon(QPolygon([
+            QPoint(cx, dn_cy + th // 2),
+            QPoint(cx + tw // 2, dn_cy - th // 2),
+            QPoint(cx - tw // 2, dn_cy - th // 2),
+        ]))
+        p.end()
 
 # Dynamic Lexer Mapping
 LEXER_MAP = {
@@ -150,7 +255,7 @@ class RTLPlainTextEdit(QPlainTextEdit):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             delta = event.angleDelta().y()
             self._zoom_size += (1 if delta > 0 else -1)
-            self._zoom_size = max(6, min(72, self._zoom_size))
+            self._zoom_size = max(8, min(72, self._zoom_size))
             font = self.font()
             font.setPixelSize(self._zoom_size)
             self.setFont(font)
@@ -198,7 +303,7 @@ class RTLPlainTextEdit(QPlainTextEdit):
         """Let Qt handle cursor tracking natively with RTL scrollbar."""
         self.ensureCursorVisible()
 
-class ZenithEditor(QsciScintilla):
+class NyoxEditor(QsciScintilla):
     SPELLCHECK_INDICATOR = 8
 
     def __init__(self, parent=None):
@@ -217,7 +322,6 @@ class ZenithEditor(QsciScintilla):
         # --- ENABLE DRAG AND DROP ---
         self.setAcceptDrops(True)
 
-        # --- FIX: CLEAR SHORTCUT ---
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('T') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('F') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('G') | (QsciScintilla.SCMOD_CTRL << 16))
@@ -264,18 +368,26 @@ class ZenithEditor(QsciScintilla):
             self.textChanged.connect(self.trigger_spellcheck)
         self.linesChanged.connect(self.update_margin_width)
         self.textChanged.connect(self._detect_text_direction)
+        self.cursorPositionChanged.connect(self._check_hex_color)
+        self._hex_recheck_timer = QTimer(self)
+        self._hex_recheck_timer.setSingleShot(True)
+        self._hex_recheck_timer.setInterval(80)
+        self._hex_recheck_timer.timeout.connect(self._recheck_hex_after_text_change)
+        self.textChanged.connect(self._hex_recheck_timer.start)
         
-        # Track current layout direction
         self._is_rtl = False
         
-        # --- RTL OVERLAY (Qt's native BiDi text engine) ---
+        # --- INLINE HEX COLOR POPUP ---
+        self._hex_popup = None
+        self._last_hex_color = None
+        
         self._rtl_overlay = RTLPlainTextEdit(self)
         self._rtl_overlay.hide()
-        self._syncing = False  # Prevent sync loops
+        self._syncing = False  
         self._rtl_overlay.textChanged.connect(self._on_rtl_overlay_changed)
         self._update_rtl_overlay_style()
 
-    # --- DRAG & DROP SUPPORT (FIXED FOR VIDEOS) ---
+    # --- DRAG & DROP SUPPORT
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
@@ -350,6 +462,22 @@ class ZenithEditor(QsciScintilla):
             self.insert(mapping[event.text()])
             super().keyPressEvent(event)
             return
+
+        if event.key() == Qt.Key.Key_Tab and CONFIG["editor"].get("enable_snippets", True) and not self.isListActive():
+            line, index = self.getCursorPosition()
+            line_text = self.text(line)[:index]
+            SNIPPETS = {
+                "html:": "<!DOCTYPE html>\n<html>\n<head>\n\t<title></title>\n</head>\n<body>\n\t\n</body>\n</html>",
+                "python:": "def main():\n    pass\n\nif __name__ == '__main__':\n    main()",
+                "c++:": "#include <iostream>\n\nint main() {\n    return 0;\n}",
+                "js:": "console.log();"
+            }
+            for trigger, replacement in SNIPPETS.items():
+                if line_text.endswith(trigger):
+                    self.setSelection(line, index - len(trigger), line, index)
+                    self.removeSelectedText()
+                    self.insert(replacement)
+                    return
 
         super().keyPressEvent(event)
 
@@ -448,6 +576,8 @@ class ZenithEditor(QsciScintilla):
         
         if hasattr(self, '_rtl_overlay'):
             self._update_rtl_overlay_style()
+            
+        self._setup_minimap()
 
     def _check_keyboard_layout(self):
         """Detect the current Windows keyboard layout and switch to RTL if needed."""
@@ -535,10 +665,12 @@ class ZenithEditor(QsciScintilla):
         self._syncing = False
     
     def resizeEvent(self, event):
-        """Keep RTL overlay sized correctly."""
+        """Keep RTL overlay and minimap sized correctly."""
         super().resizeEvent(event)
-        if self._rtl_overlay.isVisible():
+        if hasattr(self, '_rtl_overlay') and self._rtl_overlay.isVisible():
             self._rtl_overlay.setGeometry(0, 0, self.width(), self.height())
+        if getattr(self, 'minimap', None) and self.minimap.isVisible():
+            self._position_minimap()
     
     def _apply_rtl_layout(self):
         """Switch to RTL: mirror layout, move line numbers to right, scroll to caret."""
@@ -605,3 +737,447 @@ class ZenithEditor(QsciScintilla):
                     self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, self.SPELLCHECK_INDICATOR)
                     self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE, start_byte, length_byte)
             except: pass
+
+    def _setup_minimap(self):
+        """Initialize or destroy the minimap based on config."""
+        if CONFIG["editor"].get("enable_minimap", False):
+            if not getattr(self, 'minimap', None):
+                from PyQt6.QtWidgets import QPlainTextEdit, QFrame
+                self.minimap = QPlainTextEdit(self)
+                self.minimap.setReadOnly(True)
+                self.minimap.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                self.minimap.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                self.minimap.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                self.minimap.setFrameShape(QFrame.Shape.NoFrame)
+                self.minimap.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                self.minimap.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                
+                theme = CONFIG.get("theme", {})
+                bg = theme.get("bg", "#1e1e2e")
+                fg = theme.get("fg", "#cdd6f4")
+                self.minimap.setStyleSheet(
+                    f"background-color: {bg}; color: {fg}; border-left: 1px solid "
+                    f"{theme.get('selection', '#313244')}; padding: 0px;"
+                )
+                
+                zoom_px = max(1, CONFIG["editor"].get("minimap_zoom", 2))
+                f = QFont("Courier New", 1)
+                f.setPixelSize(zoom_px)
+                self.minimap.setFont(f)
+                
+                self.minimap.setPlainText(self.text())
+                
+                self.minimap.show()
+                self.minimap.raise_()
+                QTimer.singleShot(0, self._position_minimap)
+                
+                try: self.textChanged.disconnect(self._sync_minimap_text)
+                except: pass
+                self.textChanged.connect(self._sync_minimap_text)
+                
+                # Sync scroll
+                try: self.verticalScrollBar().valueChanged.disconnect(self._sync_minimap_scroll)
+                except: pass
+                self.verticalScrollBar().valueChanged.connect(self._sync_minimap_scroll)
+            else:
+                self.minimap.show()
+                self.minimap.raise_()
+                self.minimap.setPlainText(self.text())
+                self._position_minimap()
+        else:
+            if getattr(self, 'minimap', None):
+                self.minimap.hide()
+
+    def _sync_minimap_text(self):
+        """Copy current editor text into the minimap view."""
+        if getattr(self, 'minimap', None) and self.minimap.isVisible():
+            self.minimap.blockSignals(True)
+            cursor_pos = self.minimap.verticalScrollBar().value()
+            self.minimap.setPlainText(self.text())
+            self.minimap.verticalScrollBar().setValue(cursor_pos)
+            self.minimap.blockSignals(False)
+
+    def _position_minimap(self):
+        """Position the minimap at the right edge of the editor widget itself."""
+        if not getattr(self, 'minimap', None): return
+        mw = 120
+        self.minimap.setGeometry(self.width() - mw, 0, mw, self.height())
+        zoom_px = max(1, CONFIG["editor"].get("minimap_zoom", 2))
+        f = self.minimap.font()
+        f.setPixelSize(zoom_px)
+        self.minimap.setFont(f)
+
+    def _sync_minimap_scroll(self, value):
+        if getattr(self, 'minimap', None) and self.minimap.isVisible():
+            max_self = self.verticalScrollBar().maximum()
+            if max_self > 0:
+                ratio = value / max_self
+                mc = self.minimap.verticalScrollBar().maximum()
+                self.minimap.verticalScrollBar().setValue(int(ratio * mc))
+
+    def _check_hex_color(self, line, index):
+        """Show/hide inline hex color popup below the token the cursor is on."""
+        line_text = self.text(line)
+        matches = list(re.finditer(r'#[0-9a-fA-F]{3,8}\b', line_text))
+        
+        found_color = None
+        for m in matches:
+            if m.start() <= index <= m.end():
+                found_color = m.group()
+                break
+        
+        if found_color:
+            if found_color == self._last_hex_color and self._hex_popup and self._hex_popup.isVisible():
+                return  
+            
+            self._last_hex_color = found_color
+            
+            if not self._hex_popup:
+                from PyQt6.QtWidgets import QLabel, QFrame
+                self._hex_popup = QLabel(self)
+                self._hex_popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+                self._hex_popup.setFrameShape(QFrame.Shape.Box)
+                self._hex_popup.setLineWidth(1)
+                self._hex_popup.setContentsMargins(6, 4, 8, 4)
+            
+            try:
+                color = QColor(found_color)
+                luma = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+                text_color = "#000000" if luma > 128 else "#ffffff"
+                swatch_color = found_color
+            except Exception:
+                swatch_color = "#888888"
+                text_color = "#ffffff"
+            
+            self._hex_popup.setStyleSheet(
+                f"background-color: {swatch_color}; color: {text_color}; "
+                f"border: 1px solid rgba(0,0,0,0.3); border-radius: 4px; "
+                f"font-weight: bold; font-size: 11px; font-family: 'Consolas', monospace;"
+            )
+            self._hex_popup.setText(f"  {found_color}  ")
+            self._hex_popup.adjustSize()
+            
+            line_px = self.SendScintilla(QsciScintilla.SCI_POINTYFROMPOSITION, 0,
+                                          self.SendScintilla(QsciScintilla.SCI_POSITIONFROMLINE, line))
+            line_height = self.textHeight(line)
+            x_px = self.SendScintilla(QsciScintilla.SCI_POINTXFROMPOSITION, 0,
+                                       self.positionFromLineIndex(line, m.start()))
+            
+            self._hex_popup.move(max(0, x_px), line_px + line_height + 2)
+            self._hex_popup.raise_()
+            self._hex_popup.show()
+        else:
+            self._last_hex_color = None
+            if self._hex_popup:
+                self._hex_popup.hide()
+
+    def _recheck_hex_after_text_change(self):
+        """Re-run hex color check at current cursor after text changes (e.g. deletion)."""
+        line, index = self.getCursorPosition()
+        self._check_hex_color(line, index)
+
+    def reset_zoom(self):
+        self.zoomTo(0)
+        if hasattr(self, '_rtl_overlay') and self._rtl_overlay.isVisible():
+            base_size = max(10, CONFIG["editor"].get("font_size", 12))
+            font = self._rtl_overlay.font()
+            font.setPixelSize(base_size)
+            self._rtl_overlay.setFont(font)
+            self._rtl_overlay._zoom_size = base_size
+
+    def insert_time_date(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QCalendarWidget, QTimeEdit, QComboBox, QDialogButtonBox, QLabel, QHBoxLayout, QPushButton
+        from PyQt6.QtCore import QTime, QDate, QDateTime, QTimeZone
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Insert Date & Time")
+        layout = QVBoxLayout(dialog)
+        
+        theme = CONFIG.get("theme", {})
+        bg      = theme.get("bg", "#1e1e2e")
+        fg      = theme.get("fg", "#cdd6f4")
+        sidebar = theme.get("sidebar", "#181825")
+        sel     = theme.get("selection", "#313244")
+        acc     = theme.get("function", "#89b4fa")
+        comment = theme.get("comment", "#6c7086")
+        
+        dialog_ss = f"""
+            QDialog, QWidget {{
+                background-color: {bg};
+                color: {fg};
+                font-family: 'Inter', 'Segoe UI', sans-serif;
+            }}
+            /* --- CALENDAR CORE --- */
+            QCalendarWidget {{ background-color: {bg}; color: {fg}; border: none; }}
+            /* Navigation bar (prev/next month, month+year label) */
+            QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                background-color: {sidebar};
+                padding: 4px 2px;
+                border: none;
+            }}
+            QCalendarWidget QToolButton {{
+                background-color: transparent;
+                color: {fg};
+                border: none;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QCalendarWidget QToolButton:hover {{ background-color: {sel}; color: {acc}; }}
+            QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; }}
+            QCalendarWidget QSpinBox {{
+                background-color: {sel};
+                color: {fg};
+                border: 1px solid {acc};
+                border-radius: 4px;
+                padding: 2px 6px;
+                selection-background-color: {acc};
+                selection-color: {bg};
+            }}
+            QCalendarWidget QSpinBox::up-button, QCalendarWidget QSpinBox::down-button {{
+                background: {sidebar}; border: none; width: 14px;
+            }}
+            /* Day grid area */
+            QCalendarWidget QTableView {{
+                background-color: {sidebar};
+                alternate-background-color: {bg};
+                color: {fg};
+                gridline-color: {sel};
+                selection-background-color: {acc};
+                selection-color: {bg};
+                border: none;
+                outline: none;
+            }}
+            /* Weekday name header row (Mon Tue Wed ...) */
+            QCalendarWidget QTableView QHeaderView {{
+                background-color: {bg};
+                color: {acc};
+                border: none;
+            }}
+            QCalendarWidget QTableView QHeaderView::section {{
+                background-color: {bg};
+                color: {acc};
+                padding: 4px;
+                border: none;
+                border-bottom: 1px solid {sel};
+                font-weight: 600;
+                font-size: 10px;
+            }}
+            /* --- TIME / TZ / BUTTONS --- */
+            QLabel {{ color: {fg}; background: transparent; }}
+            QTimeEdit, QComboBox {{
+                background-color: {sidebar};
+                color: {fg};
+                border: 1px solid {sel};
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-height: 24px;
+            }}
+            QTimeEdit:focus, QComboBox:focus {{ border-color: {acc}; }}
+            QTimeEdit::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                background: {sel};
+                border-left: 1px solid {comment};
+                border-top-right-radius: 4px;
+                width: 18px;
+            }}
+            QTimeEdit::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                background: {sel};
+                border-left: 1px solid {comment};
+                border-bottom-right-radius: 4px;
+                width: 18px;
+            }}
+            QTimeEdit::up-button:hover, QTimeEdit::down-button:hover {{ background: {acc}; }}
+            QCalendarWidget QTableView::item:hover {{
+                background-color: {sel};
+                color: {fg};
+                border-radius: 3px;
+            }}
+            QCalendarWidget QTableView::item:selected {{
+                background-color: {acc};
+                color: {bg};
+                border-radius: 3px;
+            }}
+            QComboBox::drop-down {{ border: none; padding-right: 6px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {sidebar};
+                color: {fg};
+                selection-background-color: {acc};
+                selection-color: {bg};
+                border: 1px solid {sel};
+            }}
+            QPushButton {{
+                background-color: {sel};
+                color: {fg};
+                border: 1px solid {comment};
+                border-radius: 4px;
+                padding: 6px 18px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: {acc}; color: {bg}; border-color: {acc}; }}
+            QPushButton:pressed {{ background-color: {sidebar}; }}
+            QDialogButtonBox {{ border: none; background: transparent; }}
+        """
+        dialog.setStyleSheet(dialog_ss)
+        
+        cal = QCalendarWidget()
+        cal.setGridVisible(False)
+        cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        
+        from PyQt6.QtGui import QTextCharFormat, QBrush
+        normal_fmt = QTextCharFormat()
+        normal_fmt.setForeground(QBrush(QColor(fg)))
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Monday, normal_fmt)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Tuesday, normal_fmt)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Wednesday, normal_fmt)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Thursday, normal_fmt)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Friday, normal_fmt)
+        wkend_fmt = QTextCharFormat()
+        wkend_fmt.setForeground(QBrush(QColor(acc)))
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, wkend_fmt)
+        cal.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, wkend_fmt)
+        
+        layout.addWidget(cal)
+        
+        time_layout = QHBoxLayout()
+        time_edit = ThemedTimeEdit(QTime.currentTime())
+        time_edit.setDisplayFormat("hh:mm:ss AP")
+        time_layout.addWidget(QLabel("Time:"))
+        time_layout.addWidget(time_edit)
+        
+        tz_combo = QComboBox()
+        tzs = [tz.data().decode('utf-8') for tz in QTimeZone.availableTimeZoneIds()]
+        tz_combo.addItems(tzs)
+        local_tz = QTimeZone.systemTimeZoneId().data().decode('utf-8')
+        if local_tz in tzs:
+            tz_combo.setCurrentText(local_tz)
+            
+        time_layout.addWidget(QLabel("Timezone:"))
+        time_layout.addWidget(tz_combo)
+        layout.addLayout(time_layout)
+        
+        cal_btn_row = QHBoxLayout()
+        cal_btn_row.addStretch()
+        
+        cal_btn_cancel = QPushButton("Cancel")
+        cal_btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cal_btn_cancel.setFixedHeight(32)
+        cal_btn_cancel.setMinimumWidth(75)
+        cal_btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {fg};
+                border: 1px solid {comment};
+                border-radius: 6px;
+                padding: 0 16px;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: {sel}; border-color: {fg}; }}
+        """)
+        cal_btn_cancel.clicked.connect(dialog.reject)
+        
+        cal_btn_ok = QPushButton("OK")
+        cal_btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        cal_btn_ok.setFixedHeight(32)
+        cal_btn_ok.setMinimumWidth(75)
+        cal_btn_ok.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {acc};
+                color: {bg};
+                border: none;
+                border-radius: 6px;
+                padding: 0 16px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {fg}; color: {bg}; }}
+            QPushButton:pressed {{ background-color: {sel}; color: {fg}; }}
+        """)
+        cal_btn_ok.clicked.connect(dialog.accept)
+        
+        cal_btn_row.addWidget(cal_btn_cancel)
+        cal_btn_row.addWidget(cal_btn_ok)
+        layout.addLayout(cal_btn_row)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_date = cal.selectedDate()
+            selected_time = time_edit.time()
+            dt = QDateTime(selected_date, selected_time)
+            dt_str = f"{dt.toString('yyyy-MM-dd hh:mm:ss')} {tz_combo.currentText()}"
+            
+            line, index = self.getCursorPosition()
+            self.insertAt(dt_str, line, index)
+            self.setCursorPosition(line, index + len(dt_str))
+
+    def evaluate_math(self):
+        sel = self.selectedText()
+        if not sel:
+            line, index = self.getCursorPosition()
+            self.setCursorPosition(line, index)
+            self.SendScintilla(QsciScintilla.SCI_WORDLEFT)
+            self.SendScintilla(QsciScintilla.SCI_WORDRIGHTEXTEND)
+            sel = self.selectedText()
+        if not sel: return
+        try:
+            result = str(eval(sel.strip(), {"__builtins__": None}))
+            self.replaceSelectedText(result)
+        except Exception:
+            pass
+
+    def base64_encode(self):
+        sel = self.selectedText()
+        if not sel:
+            line, index = self.getCursorPosition()
+            self.setCursorPosition(line, index)
+            self.SendScintilla(QsciScintilla.SCI_WORDLEFT)
+            self.SendScintilla(QsciScintilla.SCI_WORDRIGHTEXTEND)
+            sel = self.selectedText()
+        if not sel: return
+        import base64
+        try:
+            res = base64.b64encode(sel.encode('utf-8')).decode('utf-8')
+            self.replaceSelectedText(res)
+        except: pass
+
+    def base64_decode(self):
+        sel = self.selectedText()
+        if not sel:
+            line, index = self.getCursorPosition()
+            self.setCursorPosition(line, index)
+            self.SendScintilla(QsciScintilla.SCI_WORDLEFT)
+            self.SendScintilla(QsciScintilla.SCI_WORDRIGHTEXTEND)
+            sel = self.selectedText()
+        if not sel: return
+        import base64
+        try:
+            res = base64.b64decode(sel.encode('utf-8')).decode('utf-8')
+            self.replaceSelectedText(res)
+        except: pass
+
+    def contextMenuEvent(self, event):
+        from PyQt6.QtWidgets import QMenu
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        
+        action_math = menu.addAction("Evaluate Math (Ctrl+E)")
+        action_math.triggered.connect(self.evaluate_math)
+        
+        action_b64enc = menu.addAction("Base64 Encode")
+        action_b64enc.triggered.connect(self.base64_encode)
+        
+        action_b64dec = menu.addAction("Base64 Decode")
+        action_b64dec.triggered.connect(self.base64_decode)
+        
+        menu.addSeparator()
+        action_date = menu.addAction("Insert Time/Date (F5)")
+        action_date.triggered.connect(self.insert_time_date)
+        
+        action_zoom = menu.addAction("Reset Zoom (Ctrl+0)")
+        action_zoom.triggered.connect(self.reset_zoom)
+        
+        menu.exec(event.globalPos())
