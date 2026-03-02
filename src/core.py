@@ -1,7 +1,6 @@
-# src/core.py
 import json
 import os
-import copy  # Added for deepcopy
+import copy  
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class EventBus(QObject):
@@ -70,11 +69,14 @@ DEFAULT_CONFIG = {
         "cursor_blinking": True,
         "encoding": "utf-8",
         "enable_autocomplete": True,
-        "enable_syntax_highlighting": True
+        "enable_syntax_highlighting": True,
+        "enable_snippets": True,
+        "enable_minimap": False
     },
     "app": {
         "auto_save": False,
-        "theme_name": "Default Dark"
+        "theme_name": "Default Dark",
+        "update_url": "https://github.com/DxRx99/Nyox/releases"
     },
     "keybinds": {
         "sidebar_toggle": "Ctrl+B",
@@ -95,7 +97,12 @@ DEFAULT_CONFIG = {
         "paste": "Ctrl+V",
         "select_all": "Ctrl+A",
         "zoom_in": "Ctrl++",
-        "zoom_out": "Ctrl+-"
+        "zoom_out": "Ctrl+-",
+        "reset_zoom": "Ctrl+0",
+        "insert_date": "F5",
+        "evaluate_math": "Ctrl+E",
+        "base64_encode": "",
+        "base64_decode": ""
     },
     "behavior": {
         "enable_command_undo": False
