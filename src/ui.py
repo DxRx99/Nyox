@@ -14,15 +14,130 @@ from PyQt6.QtWidgets import (QToolTip, QMainWindow, QWidget, QVBoxLayout, QHBoxL
                              QTableWidgetItem, QHeaderView, QAbstractItemView, QComboBox, 
                              QApplication, QCheckBox, QListWidgetItem, QScrollBar, 
                              QPushButton, QInputDialog, QMessageBox,
-                             QFontComboBox, QListView, QGraphicsDropShadowEffect, QGraphicsOpacityEffect)
+                             QFontComboBox, QListView, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+                             QSpinBox)
 from PyQt6.QtGui import (QAction, QFont, QKeySequence, QIcon, QColor, QPainter, QPen, 
                          QPixmap, QPolygon, QShortcut, QMouseEvent, QFontDatabase, QIntValidator)
 from PyQt6.QtCore import (Qt, QSize, QPointF, QPropertyAnimation, QEasingCurve, QPoint, QRect, 
                           QEvent, QTimer, QObject, QModelIndex, QVariantAnimation, 
                           QParallelAnimationGroup, QThread, pyqtSignal)
 from PyQt6.QtGui import QMouseEvent, QCursor
-from .editor import ZenithEditor
+from .editor import NyoxEditor
 from .core import BUS, CONFIG, save_config, THEME_PALETTES
+
+
+class ThemedSpinBox(QSpinBox):
+    """QSpinBox that paints its own ▲/▼ arrow triangles so they always show
+    and routes clicks on the painted areas to stepUp/stepDown."""
+    BTN_W = 22  
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hovered_half = None   
+        self.setMouseTracking(True)
+        self._apply_base_style()
+
+    def _apply_base_style(self):
+        t   = CONFIG.get("theme", {})
+        bg  = t.get("sidebar",   "#181825")
+        fg  = t.get("fg",        "#cdd6f4")
+        sel = t.get("selection", "#313244")
+        acc = t.get("function",  "#89b4fa")
+        self.setStyleSheet(f"""
+            QSpinBox {{
+                background-color: {bg};
+                color: {fg};
+                border: 1px solid {sel};
+                border-radius: 4px;
+                padding: 4px {self.BTN_W + 6}px 4px 8px;
+                min-height: 22px;
+            }}
+            QSpinBox:focus {{ border-color: {acc}; }}
+            QSpinBox::up-button   {{ width: 0px; border: none; }}
+            QSpinBox::down-button {{ width: 0px; border: none; }}
+        """)
+
+    def _btn_rect(self):
+        """Return (bx, mid) for the button column."""
+        return self.width() - self.BTN_W, self.height() // 2
+
+    def _half_at(self, pos):
+        bx, mid = self._btn_rect()
+        if pos.x() >= bx:
+            return 'up' if pos.y() < mid else 'down'
+        return None
+
+    def mousePressEvent(self, event):
+        half = self._half_at(event.pos())
+        if half == 'up':
+            self.stepUp()
+            event.accept()
+        elif half == 'down':
+            self.stepDown()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        half = self._half_at(event.pos())
+        if half != self._hovered_half:
+            self._hovered_half = half
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered_half = None
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        t   = CONFIG.get("theme", {})
+        fg  = QColor(t.get("fg",        "#cdd6f4"))
+        sel = QColor(t.get("selection", "#313244"))
+        acc = QColor(t.get("function",  "#89b4fa"))
+        brd = QColor(t.get("comment",   "#6c7086"))
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+        bx, mid = self._btn_rect()
+
+        up_bg  = acc  if self._hovered_half == 'up'   else sel
+        dn_bg  = acc  if self._hovered_half == 'down'  else sel
+        up_fg  = QColor(t.get("bg", "#1e1e2e")) if self._hovered_half == 'up'  else fg
+        dn_fg  = QColor(t.get("bg", "#1e1e2e")) if self._hovered_half == 'down' else fg
+
+        p.setPen(QPen(brd, 1))
+        p.setBrush(up_bg)
+        p.drawRect(bx, 1, self.BTN_W - 2, mid - 2)
+        p.setBrush(dn_bg)
+        p.drawRect(bx, mid, self.BTN_W - 2, h - mid - 2)
+
+        cx   = bx + self.BTN_W // 2
+        tw, th = 7, 4
+
+        # ▲ up
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(up_fg)
+        up_cy = mid // 2
+        p.drawPolygon(QPolygon([
+            QPoint(cx,           up_cy - th // 2),
+            QPoint(cx + tw // 2, up_cy + th // 2),
+            QPoint(cx - tw // 2, up_cy + th // 2),
+        ]))
+
+        # ▼ down
+        p.setBrush(dn_fg)
+        dn_cy = mid + (h - mid) // 2
+        p.drawPolygon(QPolygon([
+            QPoint(cx,           dn_cy + th // 2),
+            QPoint(cx + tw // 2, dn_cy - th // 2),
+            QPoint(cx - tw // 2, dn_cy - th // 2),
+        ]))
+
+        p.end()
 
 
 # --- GLOBAL ICON CACHE ---
@@ -66,7 +181,6 @@ class GlobalIconCache:
         elif shape == "minus":
             painter.drawLine(m, c, size-m, c)
         
-        # --- SEARCH ICON FIX ---
         elif shape == "search":
             glass_size = int(size * 0.35)
             cx = int(size * 0.40)
@@ -256,14 +370,12 @@ class EditorOverlayBar(QFrame):
             QLineEdit:focus {{ border: 1px solid {CONFIG['theme']['function']}; }}
         """)
         
-        # Shadow
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(15)
         shadow.setColor(QColor(0, 0, 0, 80))
         shadow.setOffset(0, 4)
         self.setGraphicsEffect(shadow)
         
-        # Animation
         self.anim = QPropertyAnimation(self, b"pos")
         self.anim.setDuration(250)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -643,7 +755,6 @@ class GlobalSearchBar(EditorOverlayBar):
             self.results_list.setCurrentRow(0)
             self.results_list.show()
             
-            # --- FIX: Scrollbar Policy & Exact Height ---
             
             if item_count <= 6:
                 self.results_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -709,7 +820,7 @@ class GlobalSearchBar(EditorOverlayBar):
             self.main_window.open_file_at_line(filename, line_index)
             self.hide_animated()
 
-# --- SMOOTH SCROLL DELEGATE (Helpers) ---
+# --- SMOOTH SCROLL DELEGATE ---
 class SmoothScrollDelegate(QObject):
     def __init__(self, target_widget):
         super().__init__(target_widget)
@@ -729,7 +840,7 @@ class SmoothScrollDelegate(QObject):
         self.timer = QTimer()
         self.timer.setInterval(12) 
         self.timer.timeout.connect(self.update_scroll)
-        if isinstance(target_widget, ZenithEditor): self.step_size = 6 
+        if isinstance(target_widget, NyoxEditor): self.step_size = 6 
         else: self.step_size = 60
 
     def eventFilter(self, source, event):
@@ -1088,7 +1199,7 @@ class ModernSpinBox(QWidget):
             self.display.setText(str(self.current_value))
     def value(self): return self.current_value
 
-# --- TAB SWITCHER POPUP (Ctrl+Tab overlay) ---
+# --- TAB SWITCHER POPUP ---
 class TabSwitcherPopup(QWidget):
     """VS Code-style Ctrl+Tab popup showing all open tabs."""
     def __init__(self, parent):
@@ -1265,7 +1376,7 @@ class ExplorerItemWidget(QWidget):
         self.edit_line.setStyleSheet(f"background: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; color: {CONFIG['theme']['fg']}; border-radius: 4px; padding: 2px;")
         self.edit_line.hide()
         self.edit_line.returnPressed.connect(self.finish_rename)
-        self.edit_line.editingFinished.connect(self.finish_rename)
+        self.edit_line.installEventFilter(self)
         
         self.btn_rename = QToolButton()
         self.btn_rename.setFixedSize(26, 26)
@@ -1284,7 +1395,6 @@ class ExplorerItemWidget(QWidget):
         layout.addWidget(self.btn_rename)
         layout.addWidget(self.btn_close)
           
-        # FIX #7: Use cached icons initially
         default_icon_col = CONFIG['theme']['comment']
         self.btn_rename.setIcon(create_icon("rename_box", default_icon_col, size=24))
         self.btn_close.setIcon(create_icon("x", default_icon_col, size=18))
@@ -1343,6 +1453,20 @@ class ExplorerItemWidget(QWidget):
         
     def is_selected(self): return hasattr(self, 'is_active_selection') and self.is_active_selection
     def close_clicked(self): self.main_window.close_explorer_tab(self.item_ref)
+    
+    def eventFilter(self, obj, event):
+        """Cancel rename on Escape key without modifying the tab name."""
+        from PyQt6.QtCore import QEvent
+        if obj == self.edit_line and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self.cancel_rename()
+                return True
+        return super().eventFilter(obj, event)
+
+    def cancel_rename(self):
+        """Hide the edit line and restore the label without renaming."""
+        self.edit_line.hide()
+        self.label.show()
     
     def start_rename(self):
         self.label.hide()
@@ -1421,7 +1545,7 @@ class ModernInputDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Zenith Settings")
+        self.setWindowTitle("Nyox Settings")
         self.resize(600, 600)
         self.parent_window = parent
         
@@ -1527,7 +1651,7 @@ class SettingsDialog(QDialog):
         behav_layout.addRow("", self.add_help(self.autosave_box, "Automatically saves changes to disk when you switch tabs or close the app."))
         behav_layout.addRow("", self.add_help(self.syntax_highlight_box, "Enables color highlighting for code based on file language."))
         behav_layout.addRow("", self.add_help(self.cmd_undo_box, "Allows 'Undo' (Ctrl+Z) to reverse app actions like closing tabs or renaming, not just text edits."))
-        behav_layout.addRow("", self.add_help(self.history_box, "Automatically saves timestamped snapshots of your files to a hidden .zenith_history folder every 5 minutes."))
+        behav_layout.addRow("", self.add_help(self.history_box, "Automatically saves timestamped snapshots of your files to a hidden .nyox_history folder every 5 minutes."))
         
         self.tab_behavior.setLayout(behav_layout)
         
@@ -1560,11 +1684,36 @@ class SettingsDialog(QDialog):
         dev_layout = QFormLayout()
         dev_layout.setSpacing(15)
         
+        self.update_url_box = QLineEdit()
+        self.update_url_box.setPlaceholderText("https://github.com/DxRx99/Nyox/releases")
+        self.update_url_box.setText(CONFIG["app"].get("update_url", ""))
+        self.update_url_box.setStyleSheet(f"background-color: {CONFIG['theme']['sidebar']}; color: {CONFIG['theme']['fg']}; border: 1px solid {CONFIG['theme']['selection']}; border-radius: 4px; padding: 6px;")
+        
         self.debug_notif_box = QCheckBox("Enable Debug Notifications")
         is_debug = CONFIG.get("developer", {}).get("debug_notifications", False)
         self.debug_notif_box.setChecked(is_debug)
         
+        self.autocomplete_box = QCheckBox("Enable Autocomplete")
+        self.autocomplete_box.setChecked(CONFIG["editor"].get("enable_autocomplete", True))
+        
+        self.snippets_box = QCheckBox("Enable Snippet Engine")
+        self.snippets_box.setChecked(CONFIG["editor"].get("enable_snippets", True))
+        
+        self.minimap_box = QCheckBox("Enable Minimap")
+        self.minimap_box.setChecked(CONFIG["editor"].get("enable_minimap", False))
+        
+        self.minimap_zoom_box = ThemedSpinBox()
+        self.minimap_zoom_box.setRange(1, 12)
+        self.minimap_zoom_box.setValue(CONFIG["editor"].get("minimap_zoom", 2))
+        self.minimap_zoom_box.setSuffix(" px")
+        self.minimap_zoom_box.setToolTip("Controls the font size of text in the minimap. Higher = more readable, lower = more overview.")
+        
+        dev_layout.addRow("Update URL:", self.add_help(self.update_url_box, "URL to a .zip file containing updates for the Package Manager."))
         dev_layout.addRow("", self.add_help(self.debug_notif_box, "Shows popup notifications for internal actions like opening/closing tabs (Useful for debugging)."))
+        dev_layout.addRow("", self.add_help(self.autocomplete_box, "Shows code suggestions as you type."))
+        dev_layout.addRow("", self.add_help(self.snippets_box, "Expands keywords into full code snippets when pressing Tab."))
+        dev_layout.addRow("", self.add_help(self.minimap_box, "Displays a zoomed-out overview of your code on the right side."))
+        dev_layout.addRow("Minimap Zoom:", self.add_help(self.minimap_zoom_box, "Font size (pixels) used in the minimap panel."))
         self.tab_developer.setLayout(dev_layout)
         
         # --- FINALIZE ---
@@ -1674,7 +1823,10 @@ class SettingsDialog(QDialog):
         CONFIG["editor"]["font_family"] = self.font_box.currentFont().family()
         CONFIG["editor"]["font_size"] = max(8, self.size_box.value())
         CONFIG["editor"]["show_line_numbers"] = self.line_num_box.isChecked()
-        CONFIG["editor"]["encoding"] = self.encoding_box.currentText()
+        
+        new_enc = self.encoding_box.currentText()
+        if new_enc not in ("Base64 Encode", "Base64 Decode"):
+            CONFIG["editor"]["encoding"] = new_enc
         
         new_theme_name = self.theme_box.currentText()
         CONFIG["app"]["theme_name"] = new_theme_name
@@ -1685,6 +1837,11 @@ class SettingsDialog(QDialog):
         CONFIG["editor"]["cursor_blinking"] = self.cursor_blink_box.isChecked()
         CONFIG["app"]["auto_save"] = self.autosave_box.isChecked()
         CONFIG["editor"]["enable_syntax_highlighting"] = self.syntax_highlight_box.isChecked()
+        CONFIG["editor"]["enable_autocomplete"] = self.autocomplete_box.isChecked()
+        CONFIG["editor"]["enable_snippets"] = self.snippets_box.isChecked()
+        CONFIG["editor"]["enable_minimap"] = self.minimap_box.isChecked()
+        CONFIG["editor"]["minimap_zoom"] = self.minimap_zoom_box.value()
+        CONFIG["app"]["update_url"] = self.update_url_box.text().strip()
         
         if "behavior" not in CONFIG: CONFIG["behavior"] = {}
         CONFIG["behavior"]["enable_command_undo"] = self.cmd_undo_box.isChecked()
@@ -1830,7 +1987,13 @@ class CommandPalette(QFrame):
             ("Select All", "Ctrl+A", self.main_window.editor.selectAll),
             ("Zoom In", "Ctrl++", self.main_window.editor.zoomIn),
             ("Zoom Out", "Ctrl+-", self.main_window.editor.zoomOut),
-            ("Exit Zenith", "Alt+F4", QApplication.instance().quit),
+            ("Reset Zoom", CONFIG["keybinds"].get("reset_zoom", "Ctrl+0"), lambda: self.main_window.editor.reset_zoom()),
+            ("Insert Time/Date", CONFIG["keybinds"].get("insert_date", "F5"), lambda: self.main_window.editor.insert_time_date()),
+            ("Evaluate Math", CONFIG["keybinds"].get("evaluate_math", "Ctrl+E"), lambda: self.main_window.editor.evaluate_math()),
+            ("Base64 Encode", CONFIG["keybinds"].get("base64_encode", ""), lambda: self.main_window.editor.base64_encode()),
+            ("Base64 Decode", CONFIG["keybinds"].get("base64_decode", ""), lambda: self.main_window.editor.base64_decode()),
+            ("Check for Updates", "", self.main_window.check_for_updates),
+            ("Exit Nyox", "Alt+F4", QApplication.instance().quit),
         ]
         self.populate_list()
         
@@ -2029,7 +2192,6 @@ class SearchTriggerButton(QPushButton):
         self.lbl_text.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-size: 13px; border: none; background: transparent;")
         self.lbl_text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         
-        # TEXT ONLY SHORTCUT (NO BADGE)
         self.lbl_shortcut = QLabel("Ctrl+K")
         self.lbl_shortcut.setStyleSheet(f"""
             color: {CONFIG['theme']['comment']}; 
@@ -2047,7 +2209,6 @@ class SearchTriggerButton(QPushButton):
         layout.addWidget(self.lbl_shortcut)
         layout.setAlignment(self.lbl_shortcut, Qt.AlignmentFlag.AlignVCenter)
 
-# --- MODERN OVERLAY BUTTON (Fixed Visibility) ---
 class ModernOverlayButton(QToolButton):
     def __init__(self, parent, icon_type="close"):
         super().__init__(parent)
@@ -2104,7 +2265,7 @@ class ModernOverlayButton(QToolButton):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(c.x()-3, c.y()-3, 6, 6)
 
-# --- ZOOMABLE PREVIEW (Fixed Double Click Logic) ---
+# --- ZOOMABLE PREVIEW ---
 class ZoomablePreview(QFrame):
     def __init__(self, main_window_ref):
         super().__init__(None) 
@@ -2647,13 +2808,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         CONFIG["keybinds"]["command_palette"] = "Ctrl+K, Ctrl+Space"
         
-        # 2. Unified Undo Stack
         self.action_stack = [] 
         self.redo_stack = []
         self._is_undoing = False 
         
         if QApplication.instance(): QApplication.instance().setStyle("Fusion")
-        self.setWindowTitle("Zenith IDE")
+        self.setWindowTitle("Nyox")
         self.resize(1200, 800)
         self.file_states = {}
         self.saved_content = {} 
@@ -2786,7 +2946,7 @@ class MainWindow(QMainWindow):
         editor_layout.addWidget(self.top_bar)
         
         # --- EDITOR SETUP ---
-        self.editor = ZenithEditor()
+        self.editor = NyoxEditor()
         self.editor.setStyleSheet(f"border: none; {SCROLLBAR_CSS}")
         
         # --- EDITOR LAYOUT ---
@@ -2828,7 +2988,6 @@ class MainWindow(QMainWindow):
         self.anim_side.setDuration(250)
         self.anim_side.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self.palette = CommandPalette(self)
-        BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
         
         self.refresh_shortcuts()
         QTimer.singleShot(0, self.delayed_startup)
@@ -2892,7 +3051,6 @@ class MainWindow(QMainWindow):
             self.image_preview.hide_preview()
             return
 
-        # 2. Check Extension
         valid_exts = [
             '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', 
             '.mp4', '.webm', '.mkv', '.avi', '.mov'
@@ -3157,7 +3315,7 @@ class MainWindow(QMainWindow):
             self.addAction(act_goto)
             self._window_actions.append(act_goto)
 
-        # --- GLOBAL SEARCH (New) ---
+        # --- GLOBAL SEARCH ---
         act_global = QAction("Global Find", self)
         act_global.setShortcut("Ctrl+Shift+F")
         act_global.triggered.connect(self.open_global_search)
@@ -3170,6 +3328,38 @@ class MainWindow(QMainWindow):
         act_copy_path.triggered.connect(self.copy_file_path)
         self.addAction(act_copy_path)
         self._window_actions.append(act_copy_path)
+        
+        act_eval = QAction("Evaluate Math", self)
+        act_eval.setShortcut(CONFIG["keybinds"].get("evaluate_math", "Ctrl+E"))
+        act_eval.triggered.connect(lambda: self.editor.evaluate_math())
+        self.addAction(act_eval)
+        self._window_actions.append(act_eval)
+        
+        act_date = QAction("Insert Time/Date", self)
+        act_date.setShortcut(CONFIG["keybinds"].get("insert_date", "F5"))
+        act_date.triggered.connect(lambda: self.editor.insert_time_date())
+        self.addAction(act_date)
+        self._window_actions.append(act_date)
+        
+        act_b64enc = QAction("Base64 Encode", self)
+        kb_enc = CONFIG["keybinds"].get("base64_encode", "")
+        if kb_enc: act_b64enc.setShortcut(kb_enc)
+        act_b64enc.triggered.connect(lambda: self.editor.base64_encode())
+        self.addAction(act_b64enc)
+        self._window_actions.append(act_b64enc)
+        
+        act_b64dec = QAction("Base64 Decode", self)
+        kb_dec = CONFIG["keybinds"].get("base64_decode", "")
+        if kb_dec: act_b64dec.setShortcut(kb_dec)
+        act_b64dec.triggered.connect(lambda: self.editor.base64_decode())
+        self.addAction(act_b64dec)
+        self._window_actions.append(act_b64dec)
+        
+        act_zoom = QAction("Reset Zoom", self)
+        act_zoom.setShortcut(CONFIG["keybinds"].get("reset_zoom", "Ctrl+0"))
+        act_zoom.triggered.connect(lambda: self.editor.reset_zoom())
+        self.addAction(act_zoom)
+        self._window_actions.append(act_zoom)
         
         m.addSeparator()
         act_set = QAction("Settings", self)
@@ -3415,7 +3605,7 @@ class MainWindow(QMainWindow):
 
         try:
             file_dir = os.path.dirname(filepath)
-            history_dir = os.path.join(file_dir, ".zenith_history")
+            history_dir = os.path.join(file_dir, ".nyox_history")
             
             if not os.path.exists(history_dir):
                 os.makedirs(history_dir)
@@ -3458,7 +3648,6 @@ class MainWindow(QMainWindow):
         self.is_switching_internal = False
         self.apply_editor_fixes()
         
-        # --- FIXED: UPDATE GOTO BAR LIMITS ON TAB SWITCH ---
         if hasattr(self, 'goto_bar') and self.goto_bar.isVisible():
             self.goto_bar.update_limits_if_needed()
 
@@ -3495,6 +3684,8 @@ class MainWindow(QMainWindow):
     def register_command_action(self, undo_func, redo_func):
         """Pushes a Command action onto the unified stack."""
         self.action_stack.append(('cmd', undo_func, redo_func))
+        if len(self.action_stack) > 200:
+            self.action_stack.pop(0)
         self.redo_stack.clear()
 
     def record_editor_action(self):
@@ -3502,6 +3693,8 @@ class MainWindow(QMainWindow):
         if self._is_undoing: return
         if not self.action_stack or self.action_stack[-1][0] != 'editor':
             self.action_stack.append(['editor', 1])
+            if len(self.action_stack) > 200:
+                self.action_stack.pop(0)
             self.redo_stack.clear()
 
     def global_undo(self):
@@ -3523,7 +3716,10 @@ class MainWindow(QMainWindow):
             undo_func = top_item[1]
             redo_func = top_item[2]
             undo_func()
-            self.redo_stack.append(self.action_stack.pop())
+            popped = self.action_stack.pop()
+            self.redo_stack.append(popped)
+            if len(self.redo_stack) > 200:
+                self.redo_stack.pop(0)
 
         self._is_undoing = False
 
@@ -3666,3 +3862,17 @@ class MainWindow(QMainWindow):
             self.notification_popup.update_position()
             
         super().moveEvent(event)
+
+    def check_for_updates(self):
+        from .updater import UPM
+        has_update, msg = UPM.check_for_updates()
+        if has_update:
+            self.notify(msg + " Downloading and applying...", is_error=False)
+            QTimer.singleShot(1000, self._do_apply_update)
+        else:
+            self.notify(msg, is_error=not has_update and "Error" in msg)
+
+    def _do_apply_update(self):
+        from .updater import UPM
+        success, msg = UPM.apply_update()
+        self.notify(msg, is_error=not success)
