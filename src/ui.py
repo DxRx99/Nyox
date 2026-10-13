@@ -258,35 +258,6 @@ class VideoPauseOverlay(QWidget):
         finally:
             painter.end()
             
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.hide()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-            
-            center = self.rect().center()
-            radius = 35
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 150))
-            painter.drawEllipse(center, radius, radius)
-            
-            cx, cy = center.x(), center.y()
-            p1 = QPoint(cx - 10, cy - 14)
-            p2 = QPoint(cx - 10, cy + 14)
-            p3 = QPoint(cx + 16, cy)
-            
-            path = QPolygon([p1, p2, p3])
-            painter.setBrush(QColor(255, 255, 255, 240))
-            painter.drawPolygon(path)
-        finally:
-            painter.end()
-            
 # --- FILE LOADER THREAD ---
 class FileLoadWorker(QThread):
     finished_loading = pyqtSignal(str, str, bool) 
@@ -321,7 +292,7 @@ class CleanHoverListView(QListView):
         if event.type() == QEvent.Type.Leave:
             if source is self.viewport() or source is self.window():
                 global_pos = QCursor.pos()
-                if not self.geometry().contains(self.mapFromGlobal(global_pos)):
+                if not self.rect().contains(self.mapFromGlobal(global_pos)):
                     self.clearSelection()
                     if self.selectionModel(): self.selectionModel().clearCurrentIndex()
                     self.viewport().update()
@@ -539,7 +510,8 @@ class FindBar(EditorOverlayBar):
     def find_next(self):
         text = self.input.text()
         if not text: return
-        self.editor.findFirst(text, False, False, False, True, True)
+        if not self.editor.findNext():
+            self.editor.findFirst(text, False, False, False, True, True)
         
     def find_prev(self):
         text = self.input.text()
@@ -1777,14 +1749,18 @@ class SettingsDialog(QDialog):
     def ensure_default_keybinds(self):
         defaults = {
             "new_tab": "Ctrl+T", "close_tab": "Ctrl+W", "rename_tab": "Ctrl+R",
-            "open_file": "Ctrl+O", "save_file": "Ctrl+S", "save_as": "Ctrl+Shift+S",
+            "open": "Ctrl+O", "save": "Ctrl+S", "save_as": "Ctrl+Shift+S",
             "sidebar_toggle": "Ctrl+B", "command_palette": "Ctrl+K, Ctrl+Space",
             "find_text": "Ctrl+F", "global_find": "Ctrl+Shift+F", "goto_line": "Ctrl+G",
             "copy_path": "Ctrl+Shift+C", "undo": "Ctrl+Z", "redo": "Ctrl+Y",
             "cut": "Ctrl+X", "copy": "Ctrl+C", "paste": "Ctrl+V",
-            "select_all": "Ctrl+A", "zoom_in": "Ctrl++", "zoom_out": "Ctrl+-"
+            "select_all": "Ctrl+A", "zoom_in": "Ctrl++", "zoom_out": "Ctrl+-", "reset_zoom": "Ctrl+0"
         }
         if "keybinds" not in CONFIG: CONFIG["keybinds"] = {}
+        if "open_file" in CONFIG["keybinds"] and "open" not in CONFIG["keybinds"]:
+            CONFIG["keybinds"]["open"] = CONFIG["keybinds"].pop("open_file")
+        if "save_file" in CONFIG["keybinds"] and "save" not in CONFIG["keybinds"]:
+            CONFIG["keybinds"]["save"] = CONFIG["keybinds"].pop("save_file")
         for key, val in defaults.items():
             if key not in CONFIG["keybinds"]: CONFIG["keybinds"][key] = val
 
@@ -1793,6 +1769,8 @@ class SettingsDialog(QDialog):
         row = 0
         sorted_keys = sorted(CONFIG["keybinds"].keys())
         for action in sorted_keys:
+            if action in ("open_file", "save_file"):
+                continue
             shortcut = CONFIG["keybinds"][action]
             self.key_table.insertRow(row)
             display_name = action.replace("_", " ").title()
@@ -1854,6 +1832,10 @@ class SettingsDialog(QDialog):
             action_key = self.key_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
             new_shortcut = self.key_table.item(i, 1).text()
             CONFIG["keybinds"][action_key] = new_shortcut
+            if action_key == "open":
+                CONFIG["keybinds"]["open_file"] = new_shortcut
+            elif action_key == "save":
+                CONFIG["keybinds"]["save_file"] = new_shortcut
             
         save_config() 
         
@@ -1864,6 +1846,8 @@ class SettingsDialog(QDialog):
             self.parent_window.apply_theme()
             self.parent_window.refresh_shortcuts()
             self.parent_window.update_status_encoding()
+            if hasattr(self.parent_window, 'update_auto_save_state'):
+                self.parent_window.update_auto_save_state()
             self.parent_window.apply_editor_fixes() 
             self.parent_window.editor.set_lexer_from_filename(self.parent_window.last_active_filename or "untitled.txt")
             
@@ -2096,7 +2080,7 @@ class CommandPalette(QFrame):
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.Type.MouseButtonPress:
-            if self.isVisible() and not self.geometry().contains(self.mapFromGlobal(event.globalPosition().toPoint())):
+            if self.isVisible() and not self.rect().contains(self.mapFromGlobal(event.globalPosition().toPoint())):
                 self.hide_animated()
                 return True 
         if source == self.input and event.type() == QEvent.Type.KeyPress:
@@ -2817,12 +2801,16 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         self.file_states = {}
         self.saved_content = {} 
+        self.file_paths = {}
+        self.loader = None
         self.untitled_count = 0
         self.current_file_path = None
         self.last_active_filename = None
         self.is_switching_internal = False
         self._window_actions = []
         self._extra_shortcuts = [] 
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self.check_auto_save)
         border_col = CONFIG['theme']['selection']
         
         # --- NOTIFICATION SYSTEM ---
@@ -2963,8 +2951,6 @@ class MainWindow(QMainWindow):
         if hasattr(self.editor, 'viewport'):
             self.editor.viewport().installEventFilter(self)
         
-        editor_layout.addWidget(self.editor)
-        
         # Floating Bars
         self.find_bar = FindBar(self.editor)
         self.goto_bar = GoToBar(self.editor)
@@ -2989,28 +2975,48 @@ class MainWindow(QMainWindow):
         self.anim_side.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self.palette = CommandPalette(self)
         
-        self.refresh_shortcuts()
-        QTimer.singleShot(0, self.delayed_startup)
-        
-        self.apply_theme()
-        
         BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
         
         self.refresh_shortcuts()
         QTimer.singleShot(0, self.delayed_startup)
         self.apply_theme()
+        self.update_auto_save_state()
 
         self.history_timer = QTimer(self)
         self.history_timer.setInterval(300000)
         self.history_timer.timeout.connect(self.perform_auto_snapshot)
         self.history_timer.start()
-        
-    def perform_auto_snapshot(self):
-        
-        if self.current_file_path and os.path.exists(self.current_file_path):
-            current_content = self.editor.text()
-            self.create_snapshot(self.current_file_path, current_content)
-            self.status_bar.setText(" Time Machine: Snapshot saved.")
+
+    def zoom_in(self):
+        if hasattr(self, 'editor') and self.editor:
+            self.editor.zoomIn(1)
+
+    def zoom_out(self):
+        if hasattr(self, 'editor') and self.editor:
+            self.editor.zoomOut(1)
+
+    def check_auto_save(self):
+        if not CONFIG.get("app", {}).get("auto_save", False):
+            return
+        item = self.file_list.currentItem()
+        if not item:
+            return
+        name = self.get_widget_text(item)
+        path = self.file_paths.get(name)
+        if path and os.path.exists(path):
+            widget = self.file_list.itemWidget(item)
+            is_dirty = (isinstance(widget, ExplorerItemWidget) and widget.is_dirty) or self.editor.isModified()
+            if is_dirty:
+                self.save_file()
+
+    def update_auto_save_state(self):
+        if hasattr(self, 'auto_save_timer'):
+            if CONFIG.get("app", {}).get("auto_save", False):
+                if not self.auto_save_timer.isActive():
+                    self.auto_save_timer.start(30000)
+            else:
+                if self.auto_save_timer.isActive():
+                    self.auto_save_timer.stop()
         
         
 
@@ -3284,6 +3290,11 @@ class MainWindow(QMainWindow):
         def add_action_to_window(text, slot, shortcut_key):
             act = QAction(text, self)
             seq = CONFIG["keybinds"].get(shortcut_key)
+            if not seq:
+                if shortcut_key == "open":
+                    seq = CONFIG["keybinds"].get("open_file")
+                elif shortcut_key == "save":
+                    seq = CONFIG["keybinds"].get("save_file")
             if seq:
                 keys = [QKeySequence(k.strip()) for k in seq.split(',') if k.strip()]
                 if shortcut_key in ["command_palette", "new_tab"]: pass
@@ -3296,7 +3307,7 @@ class MainWindow(QMainWindow):
         
         m.addAction(add_action_to_window("Open...", self.open_file, "open"))
         m.addAction(add_action_to_window("Save", self.save_file, "save"))
-        m.addAction(add_action_to_window("Save As...", self.save_as, ""))
+        m.addAction(add_action_to_window("Save As...", self.save_as, "save_as"))
         add_action_to_window("Close Tab", self.close_current_tab, "close_tab")
         add_action_to_window("Toggle Sidebar", self.toggle_sidebar, "sidebar_toggle")
         add_action_to_window("Palette", self.toggle_palette, "command_palette")
@@ -3304,27 +3315,31 @@ class MainWindow(QMainWindow):
         
         if hasattr(self, 'find_bar') and hasattr(self, 'goto_bar'):
             act_find = QAction("Find Text", self)
-            act_find.setShortcut("Ctrl+F")
+            find_seq = CONFIG["keybinds"].get("find_text", "Ctrl+F")
+            if find_seq: act_find.setShortcut(find_seq)
             act_find.triggered.connect(self.open_find_bar)
             self.addAction(act_find)  
             self._window_actions.append(act_find)
 
             act_goto = QAction("Go to Line", self)
-            act_goto.setShortcut("Ctrl+G")
+            goto_seq = CONFIG["keybinds"].get("goto_line", "Ctrl+G")
+            if goto_seq: act_goto.setShortcut(goto_seq)
             act_goto.triggered.connect(self.open_goto_bar)
             self.addAction(act_goto)
             self._window_actions.append(act_goto)
 
         # --- GLOBAL SEARCH ---
         act_global = QAction("Global Find", self)
-        act_global.setShortcut("Ctrl+Shift+F")
+        gfind_seq = CONFIG["keybinds"].get("global_find", "Ctrl+Shift+F")
+        if gfind_seq: act_global.setShortcut(gfind_seq)
         act_global.triggered.connect(self.open_global_search)
         self.addAction(act_global)
         self._window_actions.append(act_global)
 
         # --- COPY PATH HOTKEY ---
         act_copy_path = QAction("Copy File Path", self)
-        act_copy_path.setShortcut("Ctrl+Shift+C")
+        cp_seq = CONFIG["keybinds"].get("copy_path", "Ctrl+Shift+C")
+        if cp_seq: act_copy_path.setShortcut(cp_seq)
         act_copy_path.triggered.connect(self.copy_file_path)
         self.addAction(act_copy_path)
         self._window_actions.append(act_copy_path)
@@ -3355,6 +3370,18 @@ class MainWindow(QMainWindow):
         self.addAction(act_b64dec)
         self._window_actions.append(act_b64dec)
         
+        act_zoomin = QAction("Zoom In", self)
+        act_zoomin.setShortcut(CONFIG["keybinds"].get("zoom_in", "Ctrl++"))
+        act_zoomin.triggered.connect(self.zoom_in)
+        self.addAction(act_zoomin)
+        self._window_actions.append(act_zoomin)
+
+        act_zoomout = QAction("Zoom Out", self)
+        act_zoomout.setShortcut(CONFIG["keybinds"].get("zoom_out", "Ctrl+-"))
+        act_zoomout.triggered.connect(self.zoom_out)
+        self.addAction(act_zoomout)
+        self._window_actions.append(act_zoomout)
+
         act_zoom = QAction("Reset Zoom", self)
         act_zoom.setShortcut(CONFIG["keybinds"].get("reset_zoom", "Ctrl+0"))
         act_zoom.triggered.connect(lambda: self.editor.reset_zoom())
@@ -3385,18 +3412,33 @@ class MainWindow(QMainWindow):
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open", "", "All Files (*)")
         if path: 
-            if self.last_active_filename: self.file_states[self.last_active_filename] = self.editor.text()
+            path = os.path.abspath(path)
+            if self.last_active_filename:
+                self.file_states[self.last_active_filename] = self.editor.text()
             fname = os.path.basename(path)
-            found = False
+            
+            # Check if file is already open
+            found_item = None
             for i in range(self.file_list.count()):
                 item = self.file_list.item(i)
-                if self.get_widget_text(item) == fname: 
-                    self.file_list.setCurrentItem(item)
-                    found = True
+                w_text = self.get_widget_text(item)
+                if self.file_paths.get(w_text) == path:
+                    found_item = item
                     break
-            if not found: 
-                item = self.add_sidebar_item(fname)
-                self.file_list.setCurrentItem(item)
+            if found_item:
+                self.file_list.setCurrentItem(found_item)
+                return
+
+            tab_name = fname
+            count = 1
+            while tab_name in self.file_states or (tab_name in self.file_paths and self.file_paths[tab_name] != path):
+                base, ext = os.path.splitext(fname)
+                tab_name = f"{base} ({count}){ext}"
+                count += 1
+
+            self.file_paths[tab_name] = path
+            item = self.add_sidebar_item(tab_name)
+            self.file_list.setCurrentItem(item)
 
 
     def save_file(self):
@@ -3405,27 +3447,36 @@ class MainWindow(QMainWindow):
         name = self.get_widget_text(item)
         content = self.editor.text()
         
-        self.file_states[name] = content
-        self.saved_content[name] = content
-        
-        widget = self.file_list.itemWidget(item)
-        if isinstance(widget, ExplorerItemWidget): widget.set_dirty(False)
-        self.editor.setModified(False)
+        path = self.file_paths.get(name)
+        if not path and os.path.exists(name):
+            path = os.path.abspath(name)
+            self.file_paths[name] = path
 
-        if os.path.exists(name):
-             enc = CONFIG["editor"].get("encoding", "utf-8")
-             try:
-                with open(name, 'w', encoding=enc) as f: 
+        if path and os.path.exists(path):
+            enc = CONFIG["editor"].get("encoding", "utf-8")
+            try:
+                with open(path, 'w', encoding=enc) as f: 
                     f.write(content)
                 
-                self.notify(f"Saved {os.path.basename(name)}")
+                self.file_states[name] = content
+                self.saved_content[name] = content
+                self.current_file_path = path
+
+                widget = self.file_list.itemWidget(item)
+                if isinstance(widget, ExplorerItemWidget):
+                    widget.set_dirty(False)
+                    widget.is_new = False
+                self.editor.setModified(False)
+
+                self.notify(f"Saved {os.path.basename(path)}")
                 
                 if CONFIG.get("behavior", {}).get("enable_local_history", True):
-                    self.create_snapshot(name, content)
+                    self.create_snapshot(path, content)
 
-             except Exception as e:
-                 QMessageBox.critical(self, "Save Error", str(e))
-        else: self.save_as()
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", str(e))
+        else:
+            self.save_as()
 
     def perform_auto_snapshot(self):
         if not CONFIG.get("behavior", {}).get("enable_local_history", True):
@@ -3441,9 +3492,15 @@ class MainWindow(QMainWindow):
         if path:
             if not os.path.splitext(path)[1]:
                 path += ".txt"
+            path = os.path.abspath(path)
             enc = CONFIG["editor"].get("encoding", "utf-8")
-            with open(path, 'w', encoding=enc) as f: 
-                f.write(self.editor.text())
+            try:
+                with open(path, 'w', encoding=enc) as f: 
+                    f.write(self.editor.text())
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", str(e))
+                return
+
             item = self.file_list.currentItem()
             if item:
                 old_name = self.get_widget_text(item)
@@ -3457,15 +3514,23 @@ class MainWindow(QMainWindow):
                 if old_name in self.file_states: 
                     self.file_states[new_name] = self.file_states.pop(old_name)
                     self.last_active_filename = new_name
+                else:
+                    self.file_states[new_name] = self.editor.text()
+                    self.last_active_filename = new_name
                 
                 if old_name in self.saved_content:
                     self.saved_content.pop(old_name)
                 self.saved_content[new_name] = self.editor.text()
 
+                if old_name in self.file_paths:
+                    self.file_paths.pop(old_name)
+                self.file_paths[new_name] = path
+
                 self.current_file_path = path
                 self.editor.set_lexer_from_filename(new_name)
                 self.editor.setModified(False)
                 self.apply_editor_fixes()
+                self.notify(f"Saved {new_name}")
 
     def open_settings(self): 
         SettingsDialog(self).exec()
@@ -3496,6 +3561,45 @@ class MainWindow(QMainWindow):
         self.status_bar.setText(f" Agent Suggestion: [Tab] {text}")
 
     def closeEvent(self, event):
+        if self.last_active_filename:
+            self.file_states[self.last_active_filename] = self.editor.text()
+            
+        unsaved_tabs = []
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            name = self.get_widget_text(item)
+            widget = self.file_list.itemWidget(item)
+            is_dirty = (isinstance(widget, ExplorerItemWidget) and widget.is_dirty)
+            current_text = self.editor.text() if name == self.last_active_filename else self.file_states.get(name, "")
+            if current_text != self.saved_content.get(name, ""):
+                is_dirty = True
+            if is_dirty:
+                unsaved_tabs.append((item, name))
+
+        if unsaved_tabs:
+            tab_names_str = "\n".join(f" • {name}" for _, name in unsaved_tabs[:5])
+            if len(unsaved_tabs) > 5:
+                tab_names_str += f"\n ... and {len(unsaved_tabs) - 5} more"
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                f"You have unsaved changes in:\n\n{tab_names_str}\n\nDo you want to save them before exiting?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            elif reply == QMessageBox.StandardButton.Save:
+                for item, name in unsaved_tabs:
+                    self.file_list.setCurrentItem(item)
+                    self.save_file()
+                    widget = self.file_list.itemWidget(item)
+                    current_text = self.editor.text() if name == self.last_active_filename else self.file_states.get(name, "")
+                    if (isinstance(widget, ExplorerItemWidget) and widget.is_dirty) or (current_text != self.saved_content.get(name, "")):
+                        event.ignore()
+                        return
+
         if hasattr(self, 'image_preview'):
             self.image_preview.close()
             self.image_preview.deleteLater()
@@ -3581,17 +3685,29 @@ class MainWindow(QMainWindow):
             self.last_active_filename = curr_name
             self.breadcrumbs.setText(f"  {curr_name}  ")
             
+            disk_path = self.file_paths.get(curr_name)
+            if not disk_path and os.path.exists(curr_name):
+                disk_path = os.path.abspath(curr_name)
+                self.file_paths[curr_name] = disk_path
+
             if curr_name not in self.file_states:
-                if os.path.exists(curr_name):
+                if disk_path and os.path.exists(disk_path):
                     self.editor.setDisabled(True) 
                     enc = CONFIG["editor"].get("encoding", "utf-8")
-                    self.loader = FileLoadWorker(curr_name, enc)
-                    self.loader.finished_loading.connect(self.on_file_loaded)
+                    if hasattr(self, 'loader') and self.loader and self.loader.isRunning():
+                        self.loader.wait()
+                    self.loader = FileLoadWorker(disk_path, enc)
+                    self.loader.finished_loading.connect(
+                        lambda loaded_path, content, success, tab_name=curr_name, full_path=disk_path:
+                            self.on_file_loaded(tab_name, full_path, content, success)
+                    )
                     self.loader.start()
                     return 
                 else:
                     self.file_states[curr_name] = ""
-                    self.current_file_path = None
+                    self.current_file_path = disk_path
+            else:
+                self.current_file_path = disk_path
             
             self._finalize_switch(curr_name)
         else: 
@@ -3626,18 +3742,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Time Machine Error: {e}")
 
-    def on_file_loaded(self, name, content, success):
+    def on_file_loaded(self, tab_name, full_path, content, success):
         self.editor.setDisabled(False)
         if success:
-            self.file_states[name] = content
-            self.saved_content[name] = content
-            self.current_file_path = name
+            self.file_states[tab_name] = content
+            self.saved_content[tab_name] = content
+            self.file_paths[tab_name] = full_path
+            self.current_file_path = full_path
         else:
             QMessageBox.critical(self, "Error", f"Could not read file: {content}")
-            self.file_states[name] = ""
+            self.file_states[tab_name] = ""
             
-        if name == self.last_active_filename:
-            self._finalize_switch(name)
+        if tab_name == self.last_active_filename:
+            self._finalize_switch(tab_name)
 
     def _finalize_switch(self, curr_name):
         content = self.file_states.get(curr_name, "")
@@ -3772,6 +3889,7 @@ class MainWindow(QMainWindow):
             
         self.file_states[new_name] = ""
         self.saved_content[new_name] = "" 
+        self.file_paths[new_name] = None
         item = self.add_sidebar_item(new_name, is_new=True)
         self.file_list.takeItem(self.file_list.row(item))
         self.file_list.insertItem(0, item)
@@ -3803,10 +3921,36 @@ class MainWindow(QMainWindow):
 
     def _do_close_tab(self, item, register_undo=False):
         name = self.get_widget_text(item)
-        content = self.file_states.get(name, self.editor.text() if name == self.last_active_filename else "")
-        
+        widget = self.file_list.itemWidget(item)
+        is_dirty = (isinstance(widget, ExplorerItemWidget) and widget.is_dirty)
+        if name == self.last_active_filename:
+            content = self.editor.text()
+            if content != self.saved_content.get(name, ""):
+                is_dirty = True
+        else:
+            content = self.file_states.get(name, "")
+
+        if is_dirty:
+            self.file_list.setCurrentItem(item)
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                f"Do you want to save changes to '{name}' before closing?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+            elif reply == QMessageBox.StandardButton.Save:
+                self.save_file()
+                current_text = self.editor.text() if name == self.last_active_filename else self.file_states.get(name, "")
+                if (isinstance(widget, ExplorerItemWidget) and widget.is_dirty) or (current_text != self.saved_content.get(name, "")):
+                    return
+
         if name in self.file_states: del self.file_states[name]
         if name in self.saved_content: del self.saved_content[name]
+        if name in self.file_paths: del self.file_paths[name]
+        
         self.file_list.takeItem(self.file_list.row(item))
         
         if register_undo and CONFIG.get("behavior", {}).get("enable_command_undo", False):
@@ -3815,7 +3959,8 @@ class MainWindow(QMainWindow):
                 lambda: self.close_tab_by_name(name)
             )
             
-        if self.file_list.count() == 0: QApplication.quit()
+        if self.file_list.count() == 0:
+            self.create_new_explorer_item(register_undo=False)
 
     def rename_current_tab(self, register_undo=False):
         item = self.file_list.currentItem()
@@ -3829,6 +3974,8 @@ class MainWindow(QMainWindow):
             self.file_states[new_name] = self.file_states.pop(old_name)
         if old_name in self.saved_content:
             self.saved_content[new_name] = self.saved_content.pop(old_name)
+        if old_name in self.file_paths:
+            self.file_paths[new_name] = self.file_paths.pop(old_name)
             
         item_found = None
         for i in range(self.file_list.count()):

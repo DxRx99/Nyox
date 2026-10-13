@@ -82,6 +82,7 @@ DEFAULT_CONFIG = {
         "sidebar_toggle": "Ctrl+B",
         "command_palette": "Ctrl+K, Ctrl+Space",
         "save": "Ctrl+S",
+        "save_as": "Ctrl+Shift+S",
         "open": "Ctrl+O",
         "new_tab": "Ctrl+T",
         "close_tab": "Ctrl+W",
@@ -112,7 +113,7 @@ DEFAULT_CONFIG = {
     }
 }
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
 
 def get_scrollbar_css(bg, sel, func):
     return f"""

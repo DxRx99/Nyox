@@ -7,7 +7,7 @@ import urllib.request # Placeholder for fetching updates
 class UpdatePackageManager:
     def __init__(self, current_version="1.0.0"):
         self.current_version = current_version
-        self.update_dir = "updates"
+        self.update_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "updates")
         
     def check_for_updates(self):
         """
@@ -16,16 +16,16 @@ class UpdatePackageManager:
         """
         if not os.path.exists(self.update_dir):
             os.makedirs(self.update_dir, exist_ok=True)
-            return False
+            return False, f"Nyox is up to date (version {self.current_version})."
 
         # Logic: If 'update.zip' or new files exist in update_dir, apply them
         # This is a placeholder for the actual download logic
-        return False
+        return False, f"Nyox is up to date (version {self.current_version})."
 
     def apply_update(self):
         print("UPM: Applying updates...")
         # Logic to overwrite src/ files with new files
         # Then restart the application
-        pass
+        return True, "No pending updates to apply."
 
 UPM = UpdatePackageManager()

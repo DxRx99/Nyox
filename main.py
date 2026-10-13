@@ -8,8 +8,9 @@ def main():
     app = QApplication(sys.argv)
     
 
-    if UPM.check_for_updates():
-        print("Update Available Please Update Nxyo")
+    has_update, msg = UPM.check_for_updates()
+    if has_update:
+        print("Update Available Please Update Nyox")
 
     app.setStyle("Fusion")
     
