@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QToolTip, QMainWindow, QWidget, QVBoxLayout, QHBoxL
                              QApplication, QCheckBox, QListWidgetItem, QScrollBar, 
                              QPushButton, QInputDialog, QMessageBox,
                              QFontComboBox, QListView, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-                             QSpinBox)
+                             QSpinBox, QPlainTextEdit)
 from PyQt6.QtGui import (QAction, QFont, QKeySequence, QIcon, QColor, QPainter, QPen, 
                          QPixmap, QPolygon, QShortcut, QMouseEvent, QFontDatabase, QIntValidator)
 from PyQt6.QtCore import (Qt, QSize, QPointF, QPropertyAnimation, QEasingCurve, QPoint, QRect, 
@@ -454,9 +454,17 @@ class EditorOverlayBar(QFrame):
 class FindBar(EditorOverlayBar):
     def __init__(self, parent_editor):
         super().__init__(parent_editor)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
-        layout.setSpacing(8)
+        self.setFixedWidth(510)
+        self.setFixedHeight(50)
+        self._replace_visible = False
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 6, 10, 6)
+        main_layout.setSpacing(6)
+        
+        # --- Top Find Row ---
+        find_row = QHBoxLayout()
+        find_row.setSpacing(5)
         
         self.icon = QLabel()
         self.icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], 16).pixmap(16, 16))
@@ -466,63 +474,265 @@ class FindBar(EditorOverlayBar):
         self.input.textChanged.connect(self.find_text)
         self.input.returnPressed.connect(self.find_next)
         
-        btn_style = f"""
-            QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 4px; }}
-            QToolButton:hover {{ background: {CONFIG['theme']['selection']}; border: 1px solid {CONFIG['theme']['function']}; }}
-            QToolButton:pressed {{ background: {CONFIG['theme']['function']}; }}
-        """
+        self.match_count_lbl = QLabel("")
+        self.match_count_lbl.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-size: 11px;")
         
+        # Modifiers
+        self.btn_case = QToolButton()
+        self.btn_case.setText("Aa")
+        self.btn_case.setCheckable(True)
+        self.btn_case.setToolTip("Match Case (Alt+C)")
+        self.btn_case.clicked.connect(self.find_text)
+        
+        self.btn_word = QToolButton()
+        self.btn_word.setText("\\b")
+        self.btn_word.setCheckable(True)
+        self.btn_word.setToolTip("Match Whole Word (Alt+W)")
+        self.btn_word.clicked.connect(self.find_text)
+        
+        self.btn_regex = QToolButton()
+        self.btn_regex.setText(".*")
+        self.btn_regex.setCheckable(True)
+        self.btn_regex.setToolTip("Use Regular Expression (Alt+R)")
+        self.btn_regex.clicked.connect(self.find_text)
+
         self.btn_prev = QToolButton()
         self.btn_prev.setIcon(create_icon("arrow_up", CONFIG['theme']['fg'], 16))
-        self.btn_prev.setToolTip("Previous Match")
-        self.btn_prev.setStyleSheet(btn_style)
+        self.btn_prev.setToolTip("Previous Match (Shift+Enter)")
         self.btn_prev.clicked.connect(self.find_prev)
         
         self.btn_next = QToolButton()
         self.btn_next.setIcon(create_icon("arrow_down", CONFIG['theme']['fg'], 16))
-        self.btn_next.setToolTip("Next Match")
-        self.btn_next.setStyleSheet(btn_style)
+        self.btn_next.setToolTip("Next Match (Enter)")
         self.btn_next.clicked.connect(self.find_next)
         
+        self.btn_toggle_replace = QToolButton()
+        self.btn_toggle_replace.setText("⇄")
+        self.btn_toggle_replace.setToolTip("Toggle Replace Mode (Ctrl+H)")
+        self.btn_toggle_replace.clicked.connect(self.toggle_replace)
+
         self.btn_close = QToolButton()
         self.btn_close.setIcon(create_icon("x", CONFIG['theme']['fg'], 14))
-        self.btn_close.setToolTip("Close")
-        self.btn_close.setStyleSheet(btn_style)
+        self.btn_close.setToolTip("Close (Esc)")
         self.btn_close.clicked.connect(self.hide_animated)
+
+        find_row.addWidget(self.icon)
+        find_row.addWidget(self.input, 1)
+        find_row.addWidget(self.match_count_lbl)
+        find_row.addWidget(self.btn_case)
+        find_row.addWidget(self.btn_word)
+        find_row.addWidget(self.btn_regex)
+        find_row.addWidget(self.btn_prev)
+        find_row.addWidget(self.btn_next)
+        find_row.addWidget(self.btn_toggle_replace)
+        find_row.addWidget(self.btn_close)
+        main_layout.addLayout(find_row)
+
+        # --- Bottom Replace Row ---
+        self.replace_widget = QWidget()
+        replace_row = QHBoxLayout(self.replace_widget)
+        replace_row.setContentsMargins(0, 0, 0, 0)
+        replace_row.setSpacing(6)
         
-        layout.addWidget(self.icon)
-        layout.addWidget(self.input)
-        layout.addWidget(self.btn_prev)
-        layout.addWidget(self.btn_next)
-        layout.addWidget(self.btn_close)
+        lbl_rep_icon = QLabel("↳")
+        lbl_rep_icon.setStyleSheet(f"color: {CONFIG['theme']['comment']}; font-weight: bold; font-size: 14px;")
+        
+        self.replace_input = QLineEdit()
+        self.replace_input.setPlaceholderText("Replace with...")
+        self.replace_input.returnPressed.connect(self.replace_one)
+
+        self.btn_replace = QPushButton("Replace")
+        self.btn_replace.setToolTip("Replace current match")
+        self.btn_replace.clicked.connect(self.replace_one)
+
+        self.btn_replace_all = QPushButton("Replace All")
+        self.btn_replace_all.setToolTip("Replace all matches in document")
+        self.btn_replace_all.clicked.connect(self.replace_all)
+
+        replace_row.addWidget(lbl_rep_icon)
+        replace_row.addWidget(self.replace_input, 1)
+        replace_row.addWidget(self.btn_replace)
+        replace_row.addWidget(self.btn_replace_all)
+        main_layout.addWidget(self.replace_widget)
+        self.replace_widget.hide()
+        
+        self.apply_find_styles()
+
+    def is_replace_visible(self):
+        return self._replace_visible
+
+    def toggle_replace(self, show=None):
+        if show is None:
+            self._replace_visible = not self._replace_visible
+        else:
+            self._replace_visible = show
+        
+        if self._replace_visible:
+            self.setFixedHeight(92)
+            self.replace_widget.show()
+            self.replace_input.setFocus()
+            self.replace_input.selectAll()
+        else:
+            self.setFixedHeight(50)
+            self.replace_widget.hide()
+            self.input.setFocus()
+        self.update_position()
+
+    def show_replace(self):
+        self.show_animated()
+        self.toggle_replace(True)
+
+    def show_animated(self):
+        super().show_animated()
+        if hasattr(self, 'input'):
+            self.input.setFocus()
+            self.input.selectAll()
+
+    def apply_find_styles(self):
+        theme = CONFIG['theme']
+        bg = theme['sidebar']
+        border = theme['selection']
+        fg = theme['fg']
+        func = theme['function']
+        cmt = theme['comment']
+        
+        mod_btn_style = f"""
+            QToolButton {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 2px 5px;
+                color: {cmt};
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QToolButton:hover {{ background: {border}; color: {fg}; }}
+            QToolButton:checked {{
+                background: {border};
+                border: 1px solid {func};
+                color: {func};
+            }}
+        """
+        self.btn_case.setStyleSheet(mod_btn_style)
+        self.btn_word.setStyleSheet(mod_btn_style)
+        self.btn_regex.setStyleSheet(mod_btn_style)
+        
+        icon_btn_style = f"""
+            QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px; color: {fg}; }}
+            QToolButton:hover {{ background: {border}; border: 1px solid {func}; }}
+            QToolButton:pressed {{ background: {func}; color: {bg}; }}
+        """
+        self.btn_prev.setStyleSheet(icon_btn_style)
+        self.btn_next.setStyleSheet(icon_btn_style)
+        self.btn_toggle_replace.setStyleSheet(icon_btn_style)
+        self.btn_close.setStyleSheet(icon_btn_style)
+        
+        action_btn_style = f"""
+            QPushButton {{
+                background: {bg};
+                border: 1px solid {border};
+                border-radius: 4px;
+                color: {fg};
+                padding: 4px 10px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {border}; border-color: {func}; }}
+            QPushButton:pressed {{ background: {func}; color: {bg}; }}
+        """
+        self.btn_replace.setStyleSheet(action_btn_style)
+        self.btn_replace_all.setStyleSheet(action_btn_style)
+        self.match_count_lbl.setStyleSheet(f"color: {cmt}; font-size: 11px;")
+
+    def update_theme(self):
+        super().update_theme()
+        self.apply_find_styles()
+        theme = CONFIG['theme']
+        if hasattr(self, 'icon'):
+            self.icon.setPixmap(create_icon("search", theme['comment'], 16).pixmap(16, 16))
+        if hasattr(self, 'btn_prev'):
+            self.btn_prev.setIcon(create_icon("arrow_up", theme['fg'], 16))
+        if hasattr(self, 'btn_next'):
+            self.btn_next.setIcon(create_icon("arrow_down", theme['fg'], 16))
+        if hasattr(self, 'btn_close'):
+            self.btn_close.setIcon(create_icon("x", theme['fg'], 14))
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             self.hide_animated()
             return
+        elif event.key() == Qt.Key.Key_H and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.toggle_replace()
+            return
         super().keyPressEvent(event)
         
     def find_text(self):
         text = self.input.text()
-        if not text: return
-        self.editor.findFirst(text, False, False, False, True, True)
+        if not text:
+            self.match_count_lbl.setText("")
+            return
+        cs = self.btn_case.isChecked()
+        wo = self.btn_word.isChecked()
+        re_flag = self.btn_regex.isChecked()
+        try:
+            found = self.editor.findFirst(text, re_flag, cs, wo, True, True)
+            self.match_count_lbl.setText("" if found else "No match")
+        except Exception:
+            self.match_count_lbl.setText("Regex error")
         
     def find_next(self):
         text = self.input.text()
         if not text: return
+        cs = self.btn_case.isChecked()
+        wo = self.btn_word.isChecked()
+        re_flag = self.btn_regex.isChecked()
         if not self.editor.findNext():
-            self.editor.findFirst(text, False, False, False, True, True)
+            found = self.editor.findFirst(text, re_flag, cs, wo, True, True)
+            self.match_count_lbl.setText("" if found else "No match")
+        else:
+            self.match_count_lbl.setText("")
         
     def find_prev(self):
         text = self.input.text()
         if not text: return
-        
+        cs = self.btn_case.isChecked()
+        wo = self.btn_word.isChecked()
+        re_flag = self.btn_regex.isChecked()
         if self.editor.hasSelectedText():
             lf, if_, _, _ = self.editor.getSelection()
             if lf != -1:
                 self.editor.setCursorPosition(lf, if_)
+        found = self.editor.findFirst(text, re_flag, cs, wo, True, False)
+        self.match_count_lbl.setText("" if found else "No match")
+
+    def replace_one(self):
+        text = self.input.text()
+        if not text: return
+        rep = self.replace_input.text()
+        if self.editor.hasSelectedText():
+            self.editor.replace(rep)
+            self.find_next()
+        else:
+            self.find_next()
+            if self.editor.hasSelectedText():
+                self.editor.replace(rep)
+                self.find_next()
+
+    def replace_all(self):
+        text = self.input.text()
+        if not text: return
+        rep = self.replace_input.text()
+        cs = self.btn_case.isChecked()
+        wo = self.btn_word.isChecked()
+        re_flag = self.btn_regex.isChecked()
         
-        self.editor.findFirst(text, False, False, False, True, False)
+        count = 0
+        found = self.editor.findFirst(text, re_flag, cs, wo, False, True, 0, 0)
+        while found:
+            self.editor.replace(rep)
+            count += 1
+            found = self.editor.findNext()
+        
+        self.match_count_lbl.setText(f"{count} replaced" if count > 0 else "0 replaced")
 
 class GoToBar(EditorOverlayBar):
     def __init__(self, parent_editor):
@@ -1514,6 +1724,233 @@ class ModernInputDialog(QDialog):
     def get_text(self):
         return self.input.text()
 
+class LocalHistoryDialog(QDialog):
+    """Viewer and restorer for Time Machine snapshots stored in .nyox_history"""
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent or main_window)
+        self.main_window = main_window
+        self.current_filepath = main_window.current_file_path
+        filename = os.path.basename(self.current_filepath) if self.current_filepath else "Untitled"
+        self.setWindowTitle(f"Time Machine - Local History: {filename}")
+        self.resize(880, 530)
+        
+        theme = CONFIG.get("theme", {})
+        bg = theme.get("bg", "#1e1e2e")
+        fg = theme.get("fg", "#cdd6f4")
+        sidebar = theme.get("sidebar", "#181825")
+        sel = theme.get("selection", "#313244")
+        acc = theme.get("function", "#89b4fa")
+        comment = theme.get("comment", "#6c7086")
+        
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg}; color: {fg}; }}
+            QLabel {{ color: {fg}; font-size: 13px; }}
+            QListWidget {{ 
+                background-color: {sidebar}; 
+                border: 1px solid {sel}; 
+                border-radius: 6px; 
+                color: {fg}; 
+                outline: none;
+            }}
+            QListWidget::item {{ 
+                padding: 10px 12px; 
+                border-bottom: 1px solid {sel}; 
+                border-radius: 4px; 
+                margin: 2px 4px;
+            }}
+            QListWidget::item:hover {{ background-color: {sel}; }}
+            QListWidget::item:selected {{ 
+                background-color: {sel}; 
+                color: {acc}; 
+                border-left: 3px solid {acc}; 
+                font-weight: bold; 
+            }}
+            QPlainTextEdit {{
+                background-color: {sidebar};
+                border: 1px solid {sel};
+                border-radius: 6px;
+                color: {fg};
+                font-family: Consolas, monospace;
+                font-size: 12px;
+            }}
+            QPushButton {{ 
+                background-color: {sidebar}; 
+                border: 1px solid {sel}; 
+                color: {fg}; 
+                border-radius: 5px; 
+                padding: 6px 14px; 
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: {sel}; border-color: {acc}; }}
+            QPushButton#RestoreBtn {{ background-color: {acc}; color: {bg}; font-weight: bold; border: none; }}
+            QPushButton#RestoreBtn:hover {{ background-color: {fg}; color: {bg}; }}
+            QPushButton#DeleteBtn:hover {{ background-color: #ff5555; color: white; border-color: #ff5555; }}
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(12)
+        
+        header_layout = QHBoxLayout()
+        lbl_title = QLabel(f"Snapshots for: <b>{filename}</b>")
+        lbl_title.setStyleSheet("font-size: 15px;")
+        header_layout.addWidget(lbl_title)
+        header_layout.addStretch()
+        self.lbl_count = QLabel("")
+        self.lbl_count.setStyleSheet(f"color: {comment}; font-size: 12px;")
+        header_layout.addWidget(self.lbl_count)
+        layout.addLayout(header_layout)
+        
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(12)
+        
+        left_box = QVBoxLayout()
+        left_box.setSpacing(6)
+        lbl_list = QLabel("Saved Versions (Newest First):")
+        left_box.addWidget(lbl_list)
+        self.list_widget = QListWidget()
+        self.list_widget.setFixedWidth(280)
+        self.list_widget.currentItemChanged.connect(self.on_snapshot_selected)
+        left_box.addWidget(self.list_widget)
+        content_layout.addLayout(left_box)
+        
+        right_box = QVBoxLayout()
+        right_box.setSpacing(6)
+        self.lbl_preview_info = QLabel("Snapshot Content Preview:")
+        right_box.addWidget(self.lbl_preview_info)
+        self.preview_edit = QPlainTextEdit()
+        self.preview_edit.setReadOnly(True)
+        right_box.addWidget(self.preview_edit)
+        content_layout.addLayout(right_box, 1)
+        layout.addLayout(content_layout, 1)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_delete = QPushButton("Delete Selected")
+        self.btn_delete.setObjectName("DeleteBtn")
+        self.btn_delete.clicked.connect(self.delete_selected)
+        btn_layout.addWidget(self.btn_delete)
+        btn_layout.addStretch()
+        
+        self.btn_close = QPushButton("Cancel")
+        self.btn_close.clicked.connect(self.reject)
+        self.btn_restore = QPushButton("Restore This Version")
+        self.btn_restore.setObjectName("RestoreBtn")
+        self.btn_restore.clicked.connect(self.restore_selected)
+        
+        btn_layout.addWidget(self.btn_close)
+        btn_layout.addWidget(self.btn_restore)
+        layout.addLayout(btn_layout)
+        
+        self.load_snapshots()
+
+    def load_snapshots(self):
+        self.list_widget.clear()
+        self.preview_edit.clear()
+        if not self.current_filepath or not os.path.exists(self.current_filepath):
+            self.lbl_count.setText("No saved disk file")
+            self.preview_edit.setPlainText("This buffer has not been saved to disk yet.\nTime Machine saves snapshots whenever you save files.")
+            self.btn_restore.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+            return
+
+        file_dir = os.path.dirname(os.path.abspath(self.current_filepath))
+        history_dir = os.path.join(file_dir, ".nyox_history")
+        base_name = os.path.basename(self.current_filepath)
+        
+        if not os.path.exists(history_dir):
+            self.lbl_count.setText("0 snapshots")
+            self.preview_edit.setPlainText(f"No snapshot folder found at {history_dir}.\nSnapshots are automatically created upon saving.")
+            self.btn_restore.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+            return
+
+        snapshots = []
+        for fn in os.listdir(history_dir):
+            if fn.startswith(base_name + "_") and fn.endswith(".bak"):
+                full_p = os.path.join(history_dir, fn)
+                try:
+                    mtime = os.path.getmtime(full_p)
+                    size = os.path.getsize(full_p)
+                    snapshots.append((mtime, fn, full_p, size))
+                except Exception:
+                    pass
+
+        snapshots.sort(key=lambda x: x[0], reverse=True)
+        self.lbl_count.setText(f"{len(snapshots)} snapshot{'s' if len(snapshots) != 1 else ''}")
+        
+        if not snapshots:
+            self.preview_edit.setPlainText("No previous snapshots found for this file yet.")
+            self.btn_restore.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+            return
+
+        for mtime, fn, full_p, size in snapshots:
+            dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+            kb = size / 1024.0
+            size_str = f"{kb:.1f} KB" if kb >= 1 else f"{size} B"
+            item = QListWidgetItem(f"🕒 {dt_str}\n    ({size_str})")
+            item.setData(Qt.ItemDataRole.UserRole, (full_p, dt_str))
+            self.list_widget.addItem(item)
+            
+        self.btn_restore.setEnabled(True)
+        self.btn_delete.setEnabled(True)
+        self.list_widget.setCurrentRow(0)
+
+    def on_snapshot_selected(self, current, previous):
+        if not current:
+            self.preview_edit.clear()
+            return
+        data = current.data(Qt.ItemDataRole.UserRole)
+        if not data: return
+        full_p, dt_str = data
+        enc = CONFIG.get("editor", {}).get("encoding", "utf-8")
+        try:
+            with open(full_p, 'r', encoding=enc, errors='replace') as f:
+                content = f.read()
+            self.preview_edit.setPlainText(content)
+            self.lbl_preview_info.setText(f"Snapshot from {dt_str} ({len(content.splitlines())} lines):")
+        except Exception as e:
+            self.preview_edit.setPlainText(f"Error reading snapshot: {e}")
+
+    def restore_selected(self):
+        curr = self.list_widget.currentItem()
+        if not curr: return
+        data = curr.data(Qt.ItemDataRole.UserRole)
+        if not data: return
+        full_p, dt_str = data
+        reply = QMessageBox.question(
+            self,
+            "Restore Snapshot",
+            f"Are you sure you want to restore the snapshot from:\n{dt_str}?\n\nThis will replace the current editor buffer.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            content = self.preview_edit.toPlainText()
+            self.main_window.editor.setText(content)
+            self.main_window.notify(f"Time Machine: Restored snapshot from {dt_str}")
+            self.accept()
+
+    def delete_selected(self):
+        curr = self.list_widget.currentItem()
+        if not curr: return
+        data = curr.data(Qt.ItemDataRole.UserRole)
+        if not data: return
+        full_p, dt_str = data
+        reply = QMessageBox.question(
+            self,
+            "Delete Snapshot",
+            f"Delete the snapshot from {dt_str} permanently?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                os.remove(full_p)
+                self.load_snapshots()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not delete snapshot: {e}")
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1619,11 +2056,23 @@ class SettingsDialog(QDialog):
         self.history_box = QCheckBox("Enable Local History (Time Machine)")
         self.history_box.setChecked(current_behavior.get("enable_local_history", True))
 
+        self.auto_indent_box = QCheckBox("Enable Auto-Indentation")
+        self.auto_indent_box.setChecked(CONFIG["editor"].get("enable_auto_indent", True))
+        
+        self.code_folding_box = QCheckBox("Enable Code Folding")
+        self.code_folding_box.setChecked(CONFIG["editor"].get("enable_code_folding", True))
+        
+        self.word_wrap_box = QCheckBox("Enable Word Wrap")
+        self.word_wrap_box.setChecked(CONFIG["editor"].get("word_wrap", False))
+
         behav_layout.addRow("", self.add_help(self.cursor_blink_box, "Toggles whether the text cursor blinks or stays solid."))
         behav_layout.addRow("", self.add_help(self.autosave_box, "Automatically saves changes to disk when you switch tabs or close the app."))
         behav_layout.addRow("", self.add_help(self.syntax_highlight_box, "Enables color highlighting for code based on file language."))
         behav_layout.addRow("", self.add_help(self.cmd_undo_box, "Allows 'Undo' (Ctrl+Z) to reverse app actions like closing tabs or renaming, not just text edits."))
-        behav_layout.addRow("", self.add_help(self.history_box, "Automatically saves timestamped snapshots of your files to a hidden .nyox_history folder every 5 minutes."))
+        behav_layout.addRow("", self.add_help(self.history_box, "Automatically saves timestamped snapshots of your files to a hidden .nyox_history folder."))
+        behav_layout.addRow("", self.add_help(self.auto_indent_box, "Automatically indents new lines based on the previous line."))
+        behav_layout.addRow("", self.add_help(self.code_folding_box, "Enables fold margin and markers to collapse functions and blocks."))
+        behav_layout.addRow("", self.add_help(self.word_wrap_box, "Wraps long lines at the editor edge instead of scrolling horizontally."))
         
         self.tab_behavior.setLayout(behav_layout)
         
@@ -1807,10 +2256,8 @@ class SettingsDialog(QDialog):
             CONFIG["editor"]["encoding"] = new_enc
         
         new_theme_name = self.theme_box.currentText()
-        CONFIG["app"]["theme_name"] = new_theme_name
-        
-        if new_theme_name in THEME_PALETTES:
-            CONFIG["theme"] = THEME_PALETTES[new_theme_name].copy()
+        from .core import apply_theme_to_app
+        apply_theme_to_app(new_theme_name)
 
         CONFIG["editor"]["cursor_blinking"] = self.cursor_blink_box.isChecked()
         CONFIG["app"]["auto_save"] = self.autosave_box.isChecked()
@@ -1819,6 +2266,9 @@ class SettingsDialog(QDialog):
         CONFIG["editor"]["enable_snippets"] = self.snippets_box.isChecked()
         CONFIG["editor"]["enable_minimap"] = self.minimap_box.isChecked()
         CONFIG["editor"]["minimap_zoom"] = self.minimap_zoom_box.value()
+        CONFIG["editor"]["enable_auto_indent"] = self.auto_indent_box.isChecked()
+        CONFIG["editor"]["enable_code_folding"] = self.code_folding_box.isChecked()
+        CONFIG["editor"]["word_wrap"] = self.word_wrap_box.isChecked()
         CONFIG["app"]["update_url"] = self.update_url_box.text().strip()
         
         if "behavior" not in CONFIG: CONFIG["behavior"] = {}
@@ -1838,9 +2288,6 @@ class SettingsDialog(QDialog):
                 CONFIG["keybinds"]["save_file"] = new_shortcut
             
         save_config() 
-        
-        if new_theme_name != self.initial_theme:
-            QMessageBox.information(self, "Restart Required", "Theme changes require a restart to fully apply to all UI elements.")
 
         if self.parent_window: 
             self.parent_window.apply_theme()
@@ -1850,6 +2297,7 @@ class SettingsDialog(QDialog):
                 self.parent_window.update_auto_save_state()
             self.parent_window.apply_editor_fixes() 
             self.parent_window.editor.set_lexer_from_filename(self.parent_window.last_active_filename or "untitled.txt")
+            self.parent_window.editor.update_appearance()
             
         self.accept()
         
@@ -1929,9 +2377,9 @@ class CommandPalette(QFrame):
         search_layout.setContentsMargins(15, 12, 15, 12)
         search_layout.setSpacing(10)
         
-        lbl_icon = QLabel()
-        lbl_icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], size=18).pixmap(18, 18))
-        search_layout.addWidget(lbl_icon)
+        self.lbl_icon = QLabel()
+        self.lbl_icon.setPixmap(create_icon("search", CONFIG['theme']['comment'], size=18).pixmap(18, 18))
+        search_layout.addWidget(self.lbl_icon)
 
         self.input = QLineEdit()
         self.input.setPlaceholderText("Type a command...")
@@ -1961,8 +2409,11 @@ class CommandPalette(QFrame):
             ("Toggle Sidebar", "Ctrl+B", self.main_window.toggle_sidebar),
             ("Settings", "", self.main_window.open_settings),
             ("Find Text", "Ctrl+F", lambda: self.main_window.open_find_bar()),
+            ("Replace Text", "Ctrl+H", lambda: self.main_window.open_replace_bar()),
             ("Global Find", "Ctrl+Shift+F", lambda: self.main_window.open_global_search()),
             ("Go to Line", "Ctrl+G", lambda: self.main_window.open_goto_bar()),
+            ("Local History (Time Machine)", "Ctrl+Alt+H", lambda: self.main_window.open_local_history()),
+            ("Toggle Word Wrap", "Alt+Z", lambda: self.main_window.toggle_word_wrap()),
             ("Undo", "Ctrl+Z", self.main_window.global_undo),
             ("Redo", "Ctrl+Y", self.main_window.global_redo),
             ("Cut", "Ctrl+X", self.main_window.editor.cut),
@@ -2134,7 +2585,41 @@ class CommandPalette(QFrame):
             func() 
 
     def update_theme(self):
-        pass
+        theme = CONFIG['theme']
+        self.body.setStyleSheet(f"""
+            QFrame#PaletteBody {{
+                background-color: {theme['sidebar']};
+                border: 1px solid {theme['selection']};
+                border-radius: 8px;
+            }}
+            QLineEdit {{ 
+                color: {theme['fg']}; 
+                border: none; 
+                font-size: 16px; 
+                padding: 5px;
+            }}
+            QListWidget {{ background: transparent; color: {theme['fg']}; border: none; outline: none; }}
+            QListWidget::item {{ 
+                padding: 8px 10px; 
+                border-radius: 6px; 
+                margin: 2px 8px; 
+                border: 1px solid transparent; 
+            }}
+            QListWidget::item:hover {{ 
+                background: {theme['selection']}; 
+                border: 1px solid {theme['selection']};
+            }}
+            QListWidget::item:selected {{ 
+                background: {theme['selection']}; 
+                border: 1px solid {theme['function']};
+                color: {theme['fg']};
+                font-weight: bold; 
+            }}
+        """)
+        if hasattr(self, 'search_area'):
+            self.search_area.setStyleSheet(f"#SearchArea {{ background-color: transparent; border: none; border-bottom: 1px solid {theme['selection']}; }}")
+        if hasattr(self, 'lbl_icon'):
+            self.lbl_icon.setPixmap(create_icon("search", theme['comment'], size=18).pixmap(18, 18))
     
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape: self.hide_animated()
@@ -2975,7 +3460,7 @@ class MainWindow(QMainWindow):
         self.anim_side.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self.palette = CommandPalette(self)
         
-        BUS.ai_ghost_text_ready.connect(self.show_ghost_suggestion)
+        BUS.theme_changed.connect(lambda _: self.apply_theme())
         
         self.refresh_shortcuts()
         QTimer.singleShot(0, self.delayed_startup)
@@ -3102,6 +3587,7 @@ class MainWindow(QMainWindow):
             self.notify(f"[Debug] {action_name}")
 
     def apply_theme(self):
+        GlobalIconCache._cache.clear()
         theme = CONFIG['theme']
         
 
@@ -3216,6 +3702,8 @@ class MainWindow(QMainWindow):
         
         self.find_bar.update_theme()
         self.goto_bar.update_theme()
+        if hasattr(self, 'global_search_bar'):
+            self.global_search_bar.update_theme()
         self.palette.update_theme()
         
         for i in range(self.file_list.count()):
@@ -3242,6 +3730,27 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'goto_bar'): self.goto_bar.hide_animated()
             if hasattr(self, 'global_search_bar'): self.global_search_bar.hide_animated()
             self.find_bar.show_animated()
+
+    def open_replace_bar(self):
+        if self.find_bar.isVisible() and self.find_bar.is_replace_visible():
+            self.find_bar.hide_animated()
+        else:
+            if hasattr(self, 'goto_bar'): self.goto_bar.hide_animated()
+            if hasattr(self, 'global_search_bar'): self.global_search_bar.hide_animated()
+            self.find_bar.show_replace()
+
+    def open_local_history(self):
+        if not self.current_file_path:
+            QMessageBox.information(self, "Time Machine", "Please open or save a file first to view its local history.")
+            return
+        dlg = LocalHistoryDialog(self)
+        dlg.exec()
+
+    def toggle_word_wrap(self):
+        if hasattr(self, 'editor') and self.editor:
+            enabled = self.editor.toggle_word_wrap()
+            CONFIG["editor"]["word_wrap"] = enabled
+            self.notify(f"Word Wrap: {'ON' if enabled else 'OFF'}")
 
     def open_goto_bar(self):
         if self.goto_bar.isVisible():
@@ -3321,12 +3830,33 @@ class MainWindow(QMainWindow):
             self.addAction(act_find)  
             self._window_actions.append(act_find)
 
+            act_replace = QAction("Replace Text", self)
+            replace_seq = CONFIG["keybinds"].get("replace_text", "Ctrl+H")
+            if replace_seq: act_replace.setShortcut(replace_seq)
+            act_replace.triggered.connect(self.open_replace_bar)
+            self.addAction(act_replace)
+            self._window_actions.append(act_replace)
+
             act_goto = QAction("Go to Line", self)
             goto_seq = CONFIG["keybinds"].get("goto_line", "Ctrl+G")
             if goto_seq: act_goto.setShortcut(goto_seq)
             act_goto.triggered.connect(self.open_goto_bar)
             self.addAction(act_goto)
             self._window_actions.append(act_goto)
+
+        act_history = QAction("Local History (Time Machine)", self)
+        history_seq = CONFIG["keybinds"].get("local_history", "Ctrl+Alt+H")
+        if history_seq: act_history.setShortcut(history_seq)
+        act_history.triggered.connect(self.open_local_history)
+        self.addAction(act_history)
+        self._window_actions.append(act_history)
+
+        act_wrap = QAction("Toggle Word Wrap", self)
+        wrap_seq = CONFIG["keybinds"].get("toggle_word_wrap", "Alt+Z")
+        if wrap_seq: act_wrap.setShortcut(wrap_seq)
+        act_wrap.triggered.connect(self.toggle_word_wrap)
+        self.addAction(act_wrap)
+        self._window_actions.append(act_wrap)
 
         # --- GLOBAL SEARCH ---
         act_global = QAction("Global Find", self)
@@ -3556,9 +4086,6 @@ class MainWindow(QMainWindow):
                         self.image_preview.hide_preview()
 
         super().changeEvent(event)
-
-    def show_ghost_suggestion(self, text): 
-        self.status_bar.setText(f" Agent Suggestion: [Tab] {text}")
 
     def closeEvent(self, event):
         if self.last_active_filename:

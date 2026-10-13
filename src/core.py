@@ -6,7 +6,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 class EventBus(QObject):
     """ Central communication hub. """
     editor_text_changed = pyqtSignal(str)
-    ai_ghost_text_ready = pyqtSignal(str)
+    theme_changed = pyqtSignal(dict)
     
 BUS = EventBus()
 
@@ -71,7 +71,10 @@ DEFAULT_CONFIG = {
         "enable_autocomplete": True,
         "enable_syntax_highlighting": True,
         "enable_snippets": True,
-        "enable_minimap": False
+        "enable_minimap": False,
+        "enable_auto_indent": True,
+        "enable_code_folding": True,
+        "word_wrap": False
     },
     "app": {
         "auto_save": False,
@@ -88,6 +91,7 @@ DEFAULT_CONFIG = {
         "close_tab": "Ctrl+W",
         "rename_tab": "Ctrl+R",
         "find_text": "Ctrl+F",
+        "replace_text": "Ctrl+H",
         "global_find": "Ctrl+Shift+F",
         "goto_line": "Ctrl+G",
         "copy_path": "Ctrl+Shift+C",
@@ -103,10 +107,12 @@ DEFAULT_CONFIG = {
         "insert_date": "F5",
         "evaluate_math": "Ctrl+E",
         "base64_encode": "",
-        "base64_decode": ""
+        "base64_decode": "",
+        "local_history": "Ctrl+Alt+H"
     },
     "behavior": {
-        "enable_command_undo": False
+        "enable_command_undo": False,
+        "enable_local_history": True
     },
     "developer": {
         "debug_notifications": False
@@ -174,4 +180,21 @@ CONFIG = load_config()
 STYLES = {
     "scrollbar": get_scrollbar_css(CONFIG['theme']['sidebar'], CONFIG['theme']['selection'], CONFIG['theme']['function'])
 }
+
+def apply_theme_to_app(theme_name):
+    """Updates global CONFIG and STYLES dynamically and notifies all listeners."""
+    if theme_name in THEME_PALETTES:
+        CONFIG["app"]["theme_name"] = theme_name
+        CONFIG["theme"] = THEME_PALETTES[theme_name].copy()
+    else:
+        CONFIG["app"]["theme_name"] = "Default Dark"
+        CONFIG["theme"] = THEME_PALETTES["Default Dark"].copy()
+    
+    STYLES["scrollbar"] = get_scrollbar_css(
+        CONFIG['theme']['sidebar'], CONFIG['theme']['selection'], CONFIG['theme']['function']
+    )
+    save_config()
+    BUS.theme_changed.emit(CONFIG["theme"])
+    return CONFIG["theme"]
+
 

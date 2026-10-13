@@ -16,22 +16,55 @@
         "cursor_blinking": true,
         "encoding": "utf-8",
         "enable_autocomplete": true,
-        "enable_syntax_highlighting": true
+        "enable_syntax_highlighting": true,
+        "enable_snippets": true,
+        "enable_minimap": true,
+        "enable_auto_indent": true,
+        "enable_code_folding": true,
+        "word_wrap": true,
+        "minimap_zoom": 2
     },
     "app": {
         "auto_save": true,
-        "theme_name": "Default Dark"
+        "theme_name": "Default Dark",
+        "update_url": "https://github.com/DxRx99/Nyox/releases"
     },
     "keybinds": {
         "sidebar_toggle": "Ctrl+B",
         "command_palette": "Ctrl+K, Ctrl+Space",
         "save": "Ctrl+S",
+        "save_as": "Ctrl+Shift+S",
         "open": "Ctrl+O",
         "new_tab": "Ctrl+T",
         "close_tab": "Ctrl+W",
-        "rename_tab": "Ctrl+R"
+        "rename_tab": "Ctrl+R",
+        "find_text": "Ctrl+F",
+        "replace_text": "Ctrl+H",
+        "global_find": "Ctrl+Shift+F",
+        "goto_line": "Ctrl+G",
+        "copy_path": "Ctrl+Shift+C",
+        "undo": "Ctrl+Z",
+        "redo": "Ctrl+Y",
+        "cut": "Ctrl+X",
+        "copy": "Ctrl+C",
+        "paste": "Ctrl+V",
+        "select_all": "Ctrl+A",
+        "zoom_in": "Ctrl++",
+        "zoom_out": "Ctrl+-",
+        "reset_zoom": "Ctrl+0",
+        "insert_date": "F5",
+        "evaluate_math": "Ctrl+E",
+        "base64_encode": "",
+        "base64_decode": "",
+        "local_history": "Ctrl+Alt+H",
+        "open_file": "Ctrl+O",
+        "save_file": "Ctrl+S"
     },
     "behavior": {
-        "enable_command_undo": true
+        "enable_command_undo": true,
+        "enable_local_history": true
+    },
+    "developer": {
+        "debug_notifications": false
     }
 }

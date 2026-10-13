@@ -196,7 +196,7 @@ class RTLPlainTextEdit(QPlainTextEdit):
     
     def _update_line_number_area_width(self, _=0):
         w = self.line_number_area_width()
-        self.setViewportMargins(w, 0, 0, 0)
+        self.setViewportMargins(0, 0, w, 0)
     
     def _update_line_number_area(self, rect, dy):
         if not self._show_line_numbers:
@@ -214,7 +214,7 @@ class RTLPlainTextEdit(QPlainTextEdit):
             return
         cr = self.contentsRect()
         w = self.line_number_area_width()
-        self._line_number_area.setGeometry(QRect(cr.left(), cr.top(), w, cr.height()))
+        self._line_number_area.setGeometry(QRect(cr.right() - w, cr.top(), w, cr.height()))
     
     def _sync_line_number_font(self):
         """Update line number area font to match the main editor font."""
@@ -317,7 +317,19 @@ class NyoxEditor(QsciScintilla):
         self.setIndentationsUseTabs(False)
         self.setTabWidth(4)
         self.setIndentationGuides(True)
-        self.setWrapMode(QsciScintilla.WrapMode.WrapNone)
+        
+        # --- AUTO INDENT, WORD WRAP & FOLDING ---
+        self.setAutoIndent(CONFIG["editor"].get("enable_auto_indent", True))
+        self.setTabIndents(True)
+        self.setBackspaceUnindents(True)
+        
+        wrap = CONFIG["editor"].get("word_wrap", False)
+        self.setWrapMode(QsciScintilla.WrapMode.WrapWord if wrap else QsciScintilla.WrapMode.WrapNone)
+
+        if CONFIG["editor"].get("enable_code_folding", True):
+            self.setFolding(QsciScintilla.FoldStyle.BoxedTreeFoldStyle)
+        else:
+            self.setFolding(QsciScintilla.FoldStyle.NoFoldStyle)
 
         # --- ENABLE DRAG AND DROP ---
         self.setAcceptDrops(True)
@@ -325,6 +337,7 @@ class NyoxEditor(QsciScintilla):
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('T') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('F') | (QsciScintilla.SCMOD_CTRL << 16))
         self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('G') | (QsciScintilla.SCMOD_CTRL << 16))
+        self.SendScintilla(QsciScintilla.SCI_CLEARCMDKEY, ord('H') | (QsciScintilla.SCMOD_CTRL << 16))
 
         # --- HORIZONTAL SCROLLBAR ---
         self.SendScintilla(QsciScintilla.SCI_SETHSCROLLBAR, 1) 
@@ -347,6 +360,7 @@ class NyoxEditor(QsciScintilla):
         # Initial Setup
         self.update_appearance() 
         self.set_lexer_from_filename("untitled.txt") 
+        BUS.theme_changed.connect(lambda _: self.update_appearance()) 
 
         # --- AUTO COMPLETE SETUP ---
         if CONFIG["editor"].get("enable_autocomplete", True):
@@ -457,11 +471,52 @@ class NyoxEditor(QsciScintilla):
                 self.SendScintilla(QsciScintilla.SCI_NEWLINE)
                 return
 
-        mapping = {'(': ')', '{': '}', '[': ']', '"': '"', "'": "'"}
-        if event.text() in mapping:
-            self.insert(mapping[event.text()])
-            super().keyPressEvent(event)
+        pairs = {'(': ')', '{': '}', '[': ']', '"': '"', "'": "'", '`': '`'}
+        closers = {')', '}', ']', '"', "'", '`'}
+        
+        # 1. Selection wrapping (wrap selected text in brackets/quotes)
+        if event.text() in pairs and self.hasSelectedText():
+            sel = self.selectedText()
+            opening = event.text()
+            closing = pairs[opening]
+            self.replaceSelectedText(f"{opening}{sel}{closing}")
             return
+
+        # 2. Overtype closing bracket if already directly before it
+        if event.text() in closers and not self.hasSelectedText():
+            line, index = self.getCursorPosition()
+            line_str = self.text(line)
+            if index < len(line_str) and line_str[index] == event.text():
+                self.setCursorPosition(line, index + 1)
+                return
+
+        # 3. Auto-insert matching pair and place cursor between
+        if event.text() in pairs and not self.hasSelectedText():
+            opening = event.text()
+            closing = pairs[opening]
+            line, index = self.getCursorPosition()
+            line_str = self.text(line)
+            prev_char = line_str[index - 1] if index > 0 and index <= len(line_str) else ' '
+            # Don't auto-pair quotes if preceded by an alphanumeric char
+            if opening in ("'", '"') and prev_char.isalnum():
+                super().keyPressEvent(event)
+                return
+            self.insert(f"{opening}{closing}")
+            self.setCursorPosition(line, index + 1)
+            return
+
+        # 4. Smart pair deletion on backspace
+        if event.key() == Qt.Key.Key_Backspace and not self.hasSelectedText():
+            line, index = self.getCursorPosition()
+            if index > 0:
+                line_str = self.text(line)
+                if index < len(line_str):
+                    prev_char = line_str[index - 1]
+                    next_char = line_str[index]
+                    if (prev_char, next_char) in [('(', ')'), ('{', '}'), ('[', ']'), ('"', '"'), ("'", "'"), ('`', '`')]:
+                        self.setSelection(line, index - 1, line, index + 1)
+                        self.removeSelectedText()
+                        return
 
         if event.key() == Qt.Key.Key_Tab and CONFIG["editor"].get("enable_snippets", True) and not self.isListActive():
             line, index = self.getCursorPosition()
@@ -516,13 +571,98 @@ class NyoxEditor(QsciScintilla):
         l = self.current_lexer
         l.setPaper(colors["bg"])
         l.setColor(colors["fg"], -1)
+        for s in range(128):
+            try: l.setPaper(colors["bg"], s)
+            except Exception: pass
 
         if isinstance(l, QsciLexerJSON):
-            l.setColor(colors["fg"], 0); l.setColor(colors["kw"], 1); l.setColor(colors["str"], 2)
-            l.setColor(colors["fn"], 4); l.setColor(colors["cmt"], 6); l.setColor(colors["kw"], 11)
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["kw"], 1)
+            l.setColor(colors["str"], 2)
+            l.setColor(colors["fn"], 4)
+            l.setColor(colors["cmt"], 6)
+            l.setColor(colors["kw"], 11)
         elif isinstance(l, QsciLexerPython):
-            l.setColor(colors["fg"], 0); l.setColor(colors["cmt"], 1); l.setColor(colors["kw"], 5)
-            l.setColor(colors["str"], 4); l.setColor(colors["str"], 3); l.setColor(colors["fn"], 8); l.setColor(colors["fn"], 9)
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["cmt"], 1)
+            l.setColor(colors["cmt"], 12)
+            l.setColor(colors["kw"], 5)
+            l.setColor(colors["str"], 4)
+            l.setColor(colors["str"], 3)
+            l.setColor(colors["str"], 6)
+            l.setColor(colors["str"], 7)
+            l.setColor(colors["fn"], 8)
+            l.setColor(colors["fn"], 9)
+            l.setColor(colors["kw"], 15)
+        elif isinstance(l, (QsciLexerCPP, QsciLexerJavaScript)):
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["cmt"], 1)
+            l.setColor(colors["cmt"], 2)
+            l.setColor(colors["cmt"], 3)
+            l.setColor(colors["cmt"], 15)
+            l.setColor(colors["fn"], 4)
+            l.setColor(colors["kw"], 5)
+            l.setColor(colors["str"], 6)
+            l.setColor(colors["str"], 7)
+            l.setColor(colors["kw"], 9)
+            l.setColor(colors["fg"], 10)
+            l.setColor(colors["fg"], 11)
+            if hasattr(QsciLexerCPP, 'KeywordSet2'):
+                l.setColor(colors["fn"], 16)
+            if hasattr(QsciLexerCPP, 'GlobalClass'):
+                l.setColor(colors["fn"], 19)
+        elif isinstance(l, QsciLexerCSS):
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["kw"], 1)
+            l.setColor(colors["fn"], 2)
+            l.setColor(colors["fn"], 3)
+            l.setColor(colors["fg"], 4)
+            l.setColor(colors["fn"], 6)
+            l.setColor(colors["str"], 7)
+            l.setColor(colors["cmt"], 9)
+            l.setColor(colors["fn"], 10)
+            l.setColor(colors["kw"], 11)
+            l.setColor(colors["kw"], 12)
+            l.setColor(colors["str"], 13)
+            l.setColor(colors["str"], 14)
+        elif isinstance(l, QsciLexerHTML):
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["kw"], 1)
+            l.setColor(colors["kw"], 2)
+            l.setColor(colors["fn"], 3)
+            l.setColor(colors["fn"], 4)
+            l.setColor(colors["fn"], 5)
+            l.setColor(colors["str"], 6)
+            l.setColor(colors["str"], 7)
+            l.setColor(colors["fg"], 8)
+            l.setColor(colors["cmt"], 9)
+        elif isinstance(l, QsciLexerBash):
+            l.setColor(colors["fg"], 0)
+            l.setColor(colors["cmt"], 2)
+            l.setColor(colors["fn"], 3)
+            l.setColor(colors["kw"], 4)
+            l.setColor(colors["str"], 5)
+            l.setColor(colors["str"], 6)
+            l.setColor(colors["fg"], 7)
+            l.setColor(colors["fg"], 8)
+            l.setColor(colors["fn"], 9)
+            l.setColor(colors["fn"], 10)
+            l.setColor(colors["str"], 11)
+        elif isinstance(l, QsciLexerMarkdown):
+            l.setColor(colors["fg"], 0)
+            for h in range(1, 7):
+                if hasattr(QsciLexerMarkdown, f"Header{h}"):
+                    l.setColor(colors["kw"], getattr(QsciLexerMarkdown, f"Header{h}"))
+            if hasattr(QsciLexerMarkdown, "BlockQuote"):
+                l.setColor(colors["cmt"], QsciLexerMarkdown.BlockQuote)
+            if hasattr(QsciLexerMarkdown, "Link"):
+                l.setColor(colors["fn"], QsciLexerMarkdown.Link)
+            if hasattr(QsciLexerMarkdown, "StrongEmphasisAsterisks"):
+                l.setColor(colors["fn"], QsciLexerMarkdown.StrongEmphasisAsterisks)
+            if hasattr(QsciLexerMarkdown, "CodeBlock"):
+                l.setColor(colors["str"], QsciLexerMarkdown.CodeBlock)
+            if hasattr(QsciLexerMarkdown, "CodeBackticks"):
+                l.setColor(colors["str"], QsciLexerMarkdown.CodeBackticks)
 
     def setup_apis(self):
         if not self.current_lexer or not CONFIG["editor"].get("enable_autocomplete", True): return
@@ -541,18 +681,29 @@ class NyoxEditor(QsciScintilla):
         digits = len(str(self.lines()))
         self.setMarginWidth(0, "8" * digits + "88") 
 
+    def toggle_word_wrap(self):
+        current = CONFIG["editor"].get("word_wrap", False)
+        new_val = not current
+        CONFIG["editor"]["word_wrap"] = new_val
+        self.setWrapMode(QsciScintilla.WrapMode.WrapWord if new_val else QsciScintilla.WrapMode.WrapNone)
+        from .core import save_config
+        save_config()
+        return new_val
+
     def update_appearance(self):
         safe_size = max(10, CONFIG["editor"].get("font_size", 12))
         font_family = CONFIG["editor"]["font_family"]
         font = QFont(font_family, safe_size)
         self.setFont(font)
         
+        theme = CONFIG["theme"]
+        
         if self.current_lexer and CONFIG["editor"].get("enable_syntax_highlighting", True):
             self.current_lexer.setDefaultFont(font)
-            self.apply_lexer_styles(CONFIG["theme"])
+            self.apply_lexer_styles(theme)
         else:
-            self.setPaper(QColor(CONFIG["theme"]["bg"]))
-            self.setColor(QColor(CONFIG["theme"]["fg"]))
+            self.setPaper(QColor(theme["bg"]))
+            self.setColor(QColor(theme["fg"]))
         
         margin_font = QFont(font_family, safe_size - 2) 
         self.setMarginsFont(margin_font)
@@ -560,18 +711,40 @@ class NyoxEditor(QsciScintilla):
         is_blinking = CONFIG["editor"].get("cursor_blinking", True)
         self.SendScintilla(QsciScintilla.SCI_SETCARETPERIOD, 500 if is_blinking else 0)
 
-        theme = CONFIG["theme"]
+        # Auto indent & Word wrap
+        self.setAutoIndent(CONFIG["editor"].get("enable_auto_indent", True))
+        wrap = CONFIG["editor"].get("word_wrap", False)
+        self.setWrapMode(QsciScintilla.WrapMode.WrapWord if wrap else QsciScintilla.WrapMode.WrapNone)
+
+        # Code folding
+        if CONFIG["editor"].get("enable_code_folding", True):
+            self.setFolding(QsciScintilla.FoldStyle.BoxedTreeFoldStyle)
+            self.setFoldMarginColors(QColor(theme["sidebar"]), QColor(theme["sidebar"]))
+        else:
+            self.setFolding(QsciScintilla.FoldStyle.NoFoldStyle)
+
         self.setMarginType(0, QsciScintilla.MarginType.NumberMargin)
         self.setMarginsBackgroundColor(QColor(theme["sidebar"]))
         self.setMarginsForegroundColor(QColor(theme["comment"]))
         self.setCaretForegroundColor(QColor(theme["fg"]))
         self.setCaretLineVisible(True)
         self.setCaretLineBackgroundColor(QColor(theme["selection"]))
+        self.setSelectionBackgroundColor(QColor(theme["selection"]))
+        self.setSelectionForegroundColor(QColor(theme["fg"]))
         self.setMatchedBraceBackgroundColor(QColor(theme["selection"]))
         self.setMatchedBraceForegroundColor(QColor(theme["function"]))
         
         self.setCallTipsBackgroundColor(QColor(theme["sidebar"]))
         self.setCallTipsForegroundColor(QColor(theme["fg"]))
+        
+        # Autocomplete popup colors
+        c_side = QColor(theme["sidebar"])
+        bgr_side = c_side.blue() << 16 | c_side.green() << 8 | c_side.red()
+        c_fg = QColor(theme["fg"])
+        bgr_fg = c_fg.blue() << 16 | c_fg.green() << 8 | c_fg.red()
+        self.SendScintilla(QsciScintilla.SCI_STYLESETBACK, 32, bgr_side)
+        self.SendScintilla(QsciScintilla.SCI_STYLESETFORE, 32, bgr_fg)
+
         self.update_margin_width()
         
         if hasattr(self, '_rtl_overlay'):
